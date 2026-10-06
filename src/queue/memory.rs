@@ -1,47 +1,43 @@
-//! 进程内内存队列：每 topic 一个有界 channel + 消费协程，handler 失败按
-//! `max_attempts` 重试（退避 1s/2s/3s…），超过后记日志放弃。重启即丢，
-//! 适合开发环境与可容忍丢失的轻量任务。
+//! 进程内内存队列（feature = "queue-memory"，默认）：全实例一个有界 channel，
+//! `receive` 直接从中拉取（Worker 的并发任务天然分摊）。失败重试与死信由
+//! Worker 统一承担；重启即丢，适合开发环境与可容忍丢失的轻量任务。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::{Handler, Message, Queue, QueueError};
-use crate::config::QueueMemoryConfig;
+use super::{Delivery, Queue, QueueError};
+use crate::config::sections::QueueSettings;
 
-struct Topic {
-    tx: mpsc::Sender<Message>,
-    handler: Handler,
-    /// start() 时取走用于 spawn 消费协程
-    rx: Option<mpsc::Receiver<Message>>,
-}
-
-#[derive(Default)]
 struct State {
-    topics: HashMap<String, Topic>,
-    started: bool,
+    topics: HashSet<String>,
     closed: bool,
 }
 
 pub struct MemoryQueue {
-    buffer: usize,
-    max_attempts: u32,
+    /// close 时置 None（drop sender，消费端 recv 返回 None 自然排空退出）
+    tx: Mutex<Option<mpsc::Sender<crate::queue::Message>>>,
+    /// tokio 异步锁：recv 阻塞期间不阻塞其他任务（多 Worker 轮流持锁等待）
+    rx: tokio::sync::Mutex<Option<mpsc::Receiver<crate::queue::Message>>>,
     state: Mutex<State>,
     seq: AtomicU64,
-    running: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
 }
 
 impl MemoryQueue {
-    pub fn new(cfg: &QueueMemoryConfig) -> Self {
+    pub fn new(settings: &QueueSettings) -> Self {
+        let (tx, rx) = mpsc::channel(settings.memory.buffer.max(1));
         Self {
-            buffer: cfg.buffer.max(1),
-            max_attempts: cfg.max_attempts,
-            state: Mutex::new(State::default()),
+            tx: Mutex::new(Some(tx)),
+            rx: tokio::sync::Mutex::new(Some(rx)),
+            state: Mutex::new(State {
+                topics: HashSet::new(),
+                closed: false,
+            }),
             seq: AtomicU64::new(0),
-            running: Arc::new(AtomicBool::new(false)),
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -52,75 +48,94 @@ impl MemoryQueue {
 
 #[async_trait::async_trait]
 impl Queue for MemoryQueue {
-    async fn publish(&self, topic: &str, values: serde_json::Value) -> Result<String, QueueError> {
-        let (tx, id) = {
+    fn name(&self) -> &'static str {
+        "memory"
+    }
+
+    async fn register(&self, topic: &str) -> Result<(), QueueError> {
+        let mut st = Self::lock(&self.state);
+        if st.closed {
+            return Err(QueueError::Closed);
+        }
+        if !st.topics.insert(topic.to_string()) {
+            return Err(QueueError::AlreadyRegistered(topic.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn publish(
+        &self,
+        topic: &str,
+        payload: serde_json::Value,
+        headers: BTreeMap<String, String>,
+    ) -> Result<String, QueueError> {
+        {
             let st = Self::lock(&self.state);
             if st.closed {
                 return Err(QueueError::Closed);
             }
-            let Some(t) = st.topics.get(topic) else {
+            if !st.topics.contains(topic) {
                 return Err(QueueError::NoHandler(topic.to_string()));
-            };
-            let id = self.seq.fetch_add(1, Ordering::Relaxed).to_string();
-            (t.tx.clone(), id)
-        };
-        let msg = Message {
-            id: id.clone(),
-            topic: topic.to_string(),
-            values,
-            attempts: 1,
+            }
+        }
+        let mut msg = crate::queue::Message::new(topic, payload);
+        msg.headers = headers;
+        msg.id = self.seq.fetch_add(1, Ordering::Relaxed).to_string();
+        let tx = self
+            .tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(tx) = tx else {
+            return Err(QueueError::Closed);
         };
         // 队满报错而非阻塞业务（与 go-admin-core memory 队列语义一致）
+        let id = msg.id.clone();
         tx.try_send(msg)
             .map_err(|_| QueueError::Full(topic.to_string()))?;
         Ok(id)
     }
 
-    async fn subscribe(&self, topic: &str, handler: Handler) -> Result<(), QueueError> {
-        let mut st = Self::lock(&self.state);
-        if st.closed {
-            return Err(QueueError::Closed);
-        }
-        if st.started {
-            return Err(QueueError::AlreadyStarted);
-        }
-        if st.topics.contains_key(topic) {
-            return Err(QueueError::AlreadySubscribed(topic.to_string()));
-        }
-        let (tx, rx) = mpsc::channel(self.buffer);
-        st.topics.insert(
-            topic.to_string(),
-            Topic {
-                tx,
-                handler,
-                rx: Some(rx),
-            },
-        );
-        Ok(())
-    }
-
-    async fn start(self: Arc<Self>) -> Result<(), QueueError> {
-        let mut st = Self::lock(&self.state);
-        if st.closed {
-            return Err(QueueError::Closed);
-        }
-        if st.started {
-            return Err(QueueError::AlreadyStarted);
-        }
-        st.started = true;
-        self.running.store(true, Ordering::SeqCst);
-        for (topic, t) in st.topics.iter_mut() {
-            let Some(rx) = t.rx.take() else {
-                continue;
+    async fn receive(&self, max: usize) -> Result<Vec<Delivery>, QueueError> {
+        let mut guard = self.rx.lock().await;
+        let Some(rx) = guard.as_mut() else {
+            return Ok(Vec::new()); // 已关闭（close 后 sender drop，recv 返回 None 排空退出）
+        };
+        let mut out = Vec::new();
+        for _ in 0..max.max(1) {
+            // 首条阻塞等待（最多 500ms，避免长期占用锁）；拿到后改 try_recv 排空积压
+            let msg = if out.is_empty() {
+                match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
+                    Ok(m) => m,
+                    Err(_) => break, // 等待超时，本轮无消息
+                }
+            } else {
+                rx.try_recv().ok()
             };
-            let handler = t.handler.clone();
-            let name = topic.clone();
-            let max_attempts = self.max_attempts;
-            let running = self.running.clone();
-            tokio::spawn(async move {
-                consume(name, rx, handler, max_attempts, running).await;
+            let Some(msg) = msg else {
+                // channel 关闭：置空 receiver，后续 receive 直接返回空
+                *guard = None;
+                break;
+            };
+            out.push(Delivery {
+                ack_token: String::new(),
+                message: msg,
             });
         }
+        Ok(out)
+    }
+
+    async fn ack(&self, _delivery: &Delivery) -> Result<(), QueueError> {
+        Ok(()) // 拉取即消费，无需确认
+    }
+
+    async fn nack(&self, delivery: &Delivery) -> Result<(), QueueError> {
+        // 重试语义由 Worker 承担；到达 nack 意味着重试耗尽，只能记日志丢弃
+        tracing::error!(
+            topic = %delivery.message.topic,
+            id = %delivery.message.id,
+            "memory queue message dropped after retries"
+        );
         Ok(())
     }
 
@@ -130,51 +145,10 @@ impl Queue for MemoryQueue {
             return Ok(());
         }
         st.closed = true;
-        self.running.store(false, Ordering::SeqCst);
-        // drop 全部 sender：消费者排空缓冲后自然退出（优雅排空）
         st.topics.clear();
+        self.closed.store(true, Ordering::SeqCst);
+        // drop 全部 sender：消费者排空缓冲后自然退出（优雅排空）
+        *self.tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         Ok(())
-    }
-}
-
-/// 消费循环：排空 channel（close 后 sender 全部 drop，recv 返回 None 退出），
-/// 每条消息失败按退避重试，超过 max_attempts 记日志放弃
-async fn consume(
-    topic: String,
-    mut rx: mpsc::Receiver<Message>,
-    handler: Handler,
-    max_attempts: u32,
-    running: Arc<AtomicBool>,
-) {
-    while let Some(mut msg) = rx.recv().await {
-        let rounds = max_attempts.max(1);
-        for attempt in 1..=rounds {
-            msg.attempts = attempt;
-            match (handler)(msg.clone()).await {
-                Ok(()) => break,
-                Err(e) if attempt < rounds => {
-                    tracing::warn!(
-                        topic = %topic,
-                        id = %msg.id,
-                        attempt,
-                        error = %e,
-                        "queue handler failed, retrying"
-                    );
-                    tokio::time::sleep(Duration::from_secs(attempt as u64)).await;
-                    if !running.load(Ordering::SeqCst) {
-                        return;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        topic = %topic,
-                        id = %msg.id,
-                        attempts = attempt,
-                        error = %e,
-                        "queue handler failed permanently, message dropped"
-                    );
-                }
-            }
-        }
     }
 }

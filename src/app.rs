@@ -1,333 +1,326 @@
-//! 框架入口 [`Application`]：装配 配置 → 日志/otel → DB 池 → Redis 池 → 迁移 →
-//! 队列 → 路由 → swagger/metrics → 中间件 → 定时任务 → 配置热更新 → 优雅停机。
+//! App 构建器（文档 三·2）：装配 配置 → 日志 → 数据库 → 缓存 → 队列 →
+//! （迁移）→ 路由 → 服务，任一步失败 fail-fast 直接退出。
+//!
+//! ```rust,ignore
+//! // 示意（签名以实现为准，文档 三·2）；完整可编译示例见 examples/demo
+//! # use core_rs::prelude::*;
+//! # use axum::Router;
+//! # #[derive(Clone)] struct AppState { core: CoreState }
+//! # impl From<CoreState> for AppState {
+//! #     fn from(core: CoreState) -> Self { Self { core } }
+//! # }
+//! # async fn demo() -> anyhow::Result<()> {
+//! App::<AppState>::bootstrap()?         // APP_ENV → 多环境配置(含热更新) → tracing → 连接池 → 缓存 → 队列
+//!     .mount(Router::new())             // 用户端路由树（挂哪些中间件由路由树自己决定）
+//!     .mount(Router::new())             // 管理端路由树
+//!     .serve()                          // 优雅停机：监听 Ctrl-C / SIGTERM
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! 框架负责生命周期，应用只提供两样东西：`AppState`（内嵌 `CoreState`）和
+//! 若干棵路由树；`/health`、`/ready`、`/metrics` 由框架自动挂载。
 
 use std::future::Future;
-use std::pin::Pin;
+#[allow(unused_imports)]
+use std::pin::Pin; // migration feature 下 MigrationFuture 使用
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use axum::Router;
-use tokio::net::TcpListener;
 
-use crate::config::AppConfig;
+use crate::config::{ConfigHandle, OnChange, Settings};
 use crate::error::AppResult;
-use crate::state::AppState;
-use crate::{cache, logging, orm, web};
+use crate::queue::worker::{Handler, Worker, WorkerRunner};
+use crate::state::CoreState;
+use crate::traits::{
+    HasCache, HasConfig, HasDb, HasHealthChecks, HasQueue,
+};
 
-/// 启动前置钩子的返回 Future（如建表、灌种子数据）
-pub type SetupFuture = Pin<Box<dyn Future<Output = Result<(), crate::error::AppError>> + Send>>;
+/// 应用状态构造：`AppState` 内嵌 `CoreState` 时一行 `impl From<CoreState>` 即得
+pub trait FromCore {
+    fn from_core(core: CoreState) -> Self;
+}
 
-#[cfg(feature = "watch")]
-use crate::config::hot_reload::{OnChange, Watcher};
-
-#[cfg(feature = "queue")]
-type QueueTask = (String, crate::queue::Handler);
-
-/// 框架统一入口。用法：`Application::builder().routes(...).run().await`
-pub struct Application;
-
-impl Application {
-    pub fn builder() -> ApplicationBuilder {
-        ApplicationBuilder::default()
+impl<T: From<CoreState>> FromCore for T {
+    fn from_core(core: CoreState) -> Self {
+        T::from(core)
     }
 }
 
-#[derive(Default)]
-pub struct ApplicationBuilder {
-    config_path: Option<String>,
-    profile: Option<String>,
-    watch_override: Option<bool>,
-    routes: Vec<Router<AppState>>,
-    setup: Option<Box<dyn FnOnce(AppState) -> SetupFuture + Send>>,
-    on_config_change: Vec<OnChange>,
-    #[cfg(feature = "migration")]
-    migrations: Option<Box<dyn FnOnce(sea_orm::DatabaseConnection) -> SetupFuture + Send>>,
-    #[cfg(feature = "swagger")]
-    openapi: Option<utoipa::openapi::OpenApi>,
+/// 迁移执行闭包
+#[cfg(feature = "migration")]
+type MigrationFuture = Pin<Box<dyn Future<Output = AppResult<()>> + Send>>;
+#[cfg(feature = "migration")]
+type MigrationFn = Box<dyn FnOnce(sea_orm::DatabaseConnection) -> MigrationFuture + Send>;
+
+/// App 构建器（链式；`serve` 消耗自身并阻塞运行）
+pub struct App<S> {
+    state: S,
+    core: CoreState,
+    routers: Vec<Router<S>>,
+    consumers: Vec<(String, Handler)>,
     #[cfg(feature = "scheduler")]
-    cron_jobs: Vec<crate::scheduler::CronJob>,
-    #[cfg(feature = "queue")]
-    queue_tasks: Vec<QueueTask>,
+    jobs: Vec<crate::task::Job>,
+    #[cfg(feature = "migration")]
+    migrations: Option<MigrationFn>,
 }
 
-impl ApplicationBuilder {
-    /// 指定配置文件路径，默认 `app.yml`（相对当前工作目录）
-    pub fn config_file(mut self, path: impl Into<String>) -> Self {
-        self.config_path = Some(path.into());
+impl<S> App<S>
+where
+    S: Clone
+        + Send
+        + Sync
+        + 'static
+        + FromCore
+        + HasDb
+        + HasCache
+        + HasQueue
+        + HasConfig
+        + HasHealthChecks
+        + crate::traits::HasAuth,
+{
+    /// 标准装配：`APP_ENV` → `config/` 多环境配置（含热更新 watcher）→
+    /// tracing → 连接池 → 缓存 → 队列。
+    pub async fn bootstrap() -> AppResult<Self> {
+        let core = CoreState::bootstrap().await?;
+        Ok(Self::from_core(core))
+    }
+
+    /// 指定配置目录与环境装配
+    pub async fn bootstrap_in(dir: &str, environment: crate::config::Environment) -> AppResult<Self> {
+        let core = CoreState::bootstrap_in(dir, environment).await?;
+        Ok(Self::from_core(core))
+    }
+
+    fn from_core(core: CoreState) -> Self {
+        let state = S::from_core(core.clone());
+        Self {
+            state,
+            core,
+            routers: Vec::new(),
+            consumers: Vec::new(),
+            #[cfg(feature = "scheduler")]
+            jobs: Vec::new(),
+            #[cfg(feature = "migration")]
+            migrations: None,
+        }
+    }
+
+    /// 挂载一棵路由树（可多次调用叠加；health/ready/metrics 由框架自动挂）
+    pub fn mount(mut self, router: Router<S>) -> Self {
+        self.routers.push(router);
         self
     }
 
-    /// 指定 profile（叠加加载 `app-{profile}.yml`）；`CORE_PROFILE` 环境变量优先
-    pub fn profile(mut self, profile: impl Into<String>) -> Self {
-        self.profile = Some(profile.into());
+    /// 注册配置热更新回调（feature = "watch"）：重载成功后依次收到新配置快照
+    pub fn on_config_change(self, f: impl Fn(&Settings) + Send + Sync + 'static) -> Self {
+        let cb: OnChange<Settings> = Arc::new(f);
+        self.core.config.subscribe(cb);
         self
     }
 
-    /// 强制开/关配置热更新（feature = "watch"，默认开启）；
-    /// 缺省以 `[watch].enabled` 配置为准
-    pub fn watch(mut self, enabled: bool) -> Self {
-        self.watch_override = Some(enabled);
-        self
+    /// 配置句柄（应用需要在 serve 前读取 / 订阅配置时用）
+    pub fn config(&self) -> &ConfigHandle<Settings> {
+        &self.core.config
     }
 
-    /// 注册一组路由，可多次调用叠加。路由状态类型固定为 [`AppState`]。
-    pub fn routes(mut self, router: Router<AppState>) -> Self {
-        self.routes.push(router);
-        self
-    }
-
-    /// 注册启动前置钩子（拿到完整 AppState，可建表/灌数据），失败则中止启动。
-    pub fn setup(mut self, f: impl FnOnce(AppState) -> SetupFuture + Send + 'static) -> Self {
-        self.setup = Some(Box::new(f));
-        self
-    }
-
-    /// 注册配置热更新回调（feature = "watch"）：配置文件变更重载成功后，
-    /// 依次收到新配置快照。回调在监听线程同步执行，请保持轻量。
-    #[cfg(feature = "watch")]
-    pub fn on_config_change(
-        mut self,
-        f: impl Fn(&AppConfig) + Send + Sync + 'static,
-    ) -> Self {
-        self.on_config_change.push(Arc::new(f));
-        self
-    }
-
-    /// 注册迁移器（feature = "migration"）：启动时自动执行所有未应用的迁移。
-    #[cfg(feature = "migration")]
-    pub fn migrations<M: sea_orm_migration::MigratorTrait + 'static>(
-        mut self,
-        _migrator: M,
-    ) -> Self {
-        self.migrations = Some(Box::new(|db| {
-            Box::pin(async move { orm::migrate::up::<M>(&db).await })
-        }));
-        self
-    }
-
-    /// 注册 OpenAPI 文档（feature = "swagger"）：挂载 /swagger-ui 与 /api-docs/openapi.json
-    #[cfg(feature = "swagger")]
-    pub fn openapi(mut self, doc: utoipa::openapi::OpenApi) -> Self {
-        self.openapi = Some(doc);
-        self
-    }
-
-    /// 注册 cron 定时任务（feature = "scheduler"），schedule 为秒开头的 6/7 段 cron
-    #[cfg(feature = "scheduler")]
-    pub fn cron_job<F>(mut self, name: impl Into<String>, schedule: impl Into<String>, f: F) -> Self
-    where
-        F: Fn() -> crate::scheduler::CronFuture + Send + Sync + 'static,
-    {
-        self.cron_jobs
-            .push(crate::scheduler::CronJob::new(name, schedule, f));
-        self
-    }
-
-    /// 注册多实例互斥的 cron 定时任务（feature = "scheduler" + "dist-lock"，需 redis）：
-    /// 按 job name 加分布式锁，抢不到锁的实例本轮跳过，避免多实例重复执行
-    #[cfg(all(feature = "scheduler", feature = "dist-lock"))]
-    pub fn cron_job_distributed<F>(
-        mut self,
-        name: impl Into<String>,
-        schedule: impl Into<String>,
-        f: F,
-    ) -> Self
-    where
-        F: Fn() -> crate::scheduler::CronFuture + Send + Sync + 'static,
-    {
-        self.cron_jobs
-            .push(crate::scheduler::CronJob::new(name, schedule, f).distributed());
-        self
-    }
-
-    /// 注册队列消费任务（feature = "queue"）：topic + handler，装配时先全部
-    /// 订阅再启动消费。handler 失败重试语义见 `queue` 模块文档。
-    ///
-    /// ```no_run
-    /// # use core_rs::prelude::*;
-    /// # async fn demo() -> Result<(), AppError> {
-    /// Application::builder()
-    ///     .queue_task("email.send", |msg| async move {
-    ///         tracing::info!(payload = %msg.values, "sending email");
-    ///         Ok(())
-    ///     })
-    ///     .run().await
-    /// # }
-    /// ```
-    #[cfg(feature = "queue")]
-    pub fn queue_task<F, Fut>(mut self, topic: impl Into<String>, f: F) -> Self
+    /// 注册队列消费任务（topic + handler）：装配时先全部订阅再启动消费。
+    pub fn consumer<F, Fut>(mut self, topic: impl Into<String>, f: F) -> Self
     where
         F: Fn(crate::queue::Message) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), crate::queue::QueueError>> + Send + 'static,
     {
-        self.queue_tasks.push((
-            topic.into(),
-            Arc::new(move |msg| Box::pin(f(msg))),
-        ));
+        self.consumers
+            .push((topic.into(), Arc::new(move |msg| Box::pin(f(msg)))));
+        self
+    }
+
+    /// 注册定时任务（feature = "scheduler"）：实际是否运行由 `[task]` 配置决定
+    #[cfg(feature = "scheduler")]
+    pub fn task(mut self, job: crate::task::Job) -> Self {
+        self.jobs.push(job);
+        self
+    }
+
+    /// 注册迁移器（feature = "migration"）：serve 前自动执行所有未应用的迁移
+    #[cfg(feature = "migration")]
+    pub fn migrations<M: sea_orm_migration::MigratorTrait + 'static>(mut self, _migrator: M) -> Self {
+        self.migrations = Some(Box::new(|db| {
+            Box::pin(async move {
+                crate::db::migrator::up::<M>(&db).await?;
+                Ok(())
+            })
+        }));
         self
     }
 
     /// 执行完整装配并阻塞运行，直到收到退出信号（Ctrl+C / SIGTERM）。
-    pub async fn run(self) -> AppResult<()> {
+    /// 停机顺序：停止接新请求（排空在途）→ 队列 worker 退出 → 调度器停止。
+    pub async fn serve(self) -> AppResult<()> {
         #[cfg(feature = "scheduler")]
-        let cron_jobs = self.cron_jobs;
-        #[cfg(feature = "queue")]
-        let queue_tasks = self.queue_tasks;
-        #[cfg(feature = "watch")]
-        let on_change = self.on_config_change;
+        let jobs = self.jobs;
 
-        let cfg = Arc::new(AppConfig::load_with_profile(
-            self.config_path.as_deref(),
-            self.profile.as_deref(),
-        )?);
-        // otel guard 需持有到进程结束（Drop 时 flush spans）
-        let _otel_guard: logging::LogGuard = logging::init(&cfg);
-
-        let db = if cfg.datasource.url.is_empty() {
-            None
-        } else {
-            Some(orm::pool::connect(&cfg.datasource).await?)
-        };
-        let cache = cache::build(&cfg.cache, &cfg.redis)?;
-        // 调度器在 with_state(state) 消耗 state 之后启动，提前留一份缓存句柄
-        #[cfg(feature = "scheduler")]
-        let scheduler_cache = cache.clone();
-
-        #[cfg(feature = "queue")]
-        let queue = crate::queue::build(&cfg.queue, &cfg.redis).await?;
-
-        let state = AppState {
-            config: Arc::new(ArcSwap::from(cfg.clone())),
-            db,
-            cache,
-            #[cfg(feature = "queue")]
-            queue: queue.clone(),
-            #[cfg(feature = "jwt")]
-            jwt: if cfg.jwt.secret.is_empty() {
-                None
-            } else {
-                Some(crate::security::Jwt::new(&cfg.jwt)?)
-            },
-        };
-
-        // 热更新监听用的配置句柄：with_state(state) 消耗 state 前留一份引用
-        #[cfg(feature = "watch")]
-        let config_watch_handle = state.config.clone();
-
-        // 迁移先于 setup 钩子执行（钩子可能需要依赖迁移建好的表）
+        // 1. 迁移（应用侧 migrations 目录）
         #[cfg(feature = "migration")]
         if let Some(migrations) = self.migrations {
-            match state.db.clone() {
-                Some(db) => migrations(db).await?,
+            match &self.core.db {
+                Some(db) => migrations(db.clone()).await?,
                 None => {
                     return Err(crate::error::AppError::internal(
-                        "migrations registered but datasource url is empty",
+                        "migrations registered but database url is empty",
                     ))
                 }
             }
         }
 
-        if let Some(setup) = self.setup {
-            setup(state.clone()).await?;
-        }
-
-        // 队列：先全部订阅再启动（redis 后端订阅即建组，启动与订阅之间的消息不丢）
-        #[cfg(feature = "queue")]
-        if let Some(q) = &queue {
-            for (topic, handler) in &queue_tasks {
-                q.subscribe(topic, handler.clone()).await?;
+        // 2. 队列 worker（先注册后启动）
+        let worker_runner: Option<WorkerRunner> = if !self.consumers.is_empty() {
+            let queue_settings = self.core.config.load().queue.clone();
+            let mut worker = Worker::new(self.core.queue.clone())
+                .concurrency(queue_settings.concurrency)
+                .max_attempts(queue_settings.max_attempts)
+                .retry_backoff_ms(queue_settings.retry_backoff_ms);
+            if !queue_settings.dead_letter_topic.is_empty() {
+                worker = worker.dead_letter_topic(queue_settings.dead_letter_topic);
             }
-            if !queue_tasks.is_empty() {
-                q.clone().start().await?;
+            for (topic, handler) in self.consumers {
+                worker = worker.consumer(topic, move |msg| handler(msg));
             }
-        }
+            Some(worker.start().await?)
+        } else {
+            None
+        };
 
-        let mut router: Router<AppState> = Router::new().merge(web::health::routes());
-        for r in self.routes {
+        // 3. 定时任务调度器
+        #[cfg(feature = "scheduler")]
+        let scheduler = crate::task::start_from_config(jobs, &self.state).await?;
+
+        // 4. 路由装配：health/ready（+metrics）自动挂载，应用路由树随后合并
+        let mut router: Router<S> = crate::observability::health::routes::<S>();
+        for r in self.routers {
             router = router.merge(r);
         }
 
-        #[cfg(feature = "swagger")]
-        if let Some(doc) = self.openapi {
-            router = router.merge(
-                utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
-                    .url("/api-docs/openapi.json", doc),
-            );
-            tracing::info!("swagger ui served at /swagger-ui");
-        }
+        let settings = self.core.config.load().clone();
+        let server = &settings.server;
 
         #[cfg(feature = "metrics")]
-        let _metrics = {
-            let handle = crate::observe::metrics::init();
-            router = router.layer(axum::middleware::from_fn(crate::observe::metrics::track));
-            router = router.merge(crate::observe::metrics::routes(handle.clone()));
-            Some(handle)
-        };
-
-        let app = web::middleware::apply(router.with_state(state), &cfg.server, cfg.service_name());
-
-        #[cfg(feature = "upload")]
-        let app = match &cfg.server.static_dir {
-            Some(dir) => {
-                tracing::info!(dir = %dir, "static files served at /static");
-                app.nest_service("/static", tower_http::services::ServeDir::new(dir))
+        let metrics_handle = {
+            // 默认关闭：全量内部指标（路由/耗时/未匹配路径）不应无门控地公网暴露；
+            // 需要时在配置里显式 [server.metrics] enabled = true，并自行置于内网/加访问控制
+            if settings.server.metrics.enabled {
+                // 进程内只能安装一次 recorder（测试多 App 场景降级为不暴露 /metrics）
+                let handle = crate::observability::metrics::init();
+                if let Some(h) = &handle {
+                    let render = h.clone();
+                    router = router.route(
+                        "/metrics",
+                        axum::routing::get(move || {
+                            let render = render.clone();
+                            async move { render.render() }
+                        }),
+                    );
+                    tracing::info!("metrics endpoint served at /metrics");
+                }
+                handle
+            } else {
+                None
             }
-            None => app,
         };
 
-        #[cfg(feature = "scheduler")]
-        let _scheduler = if cron_jobs.is_empty() {
-            None
+        // 5. 中间件装配（自内向外挂，最终外→内顺序见 middleware/mod.rs）：
+        //    ip_filter → rate_limit → csrf → auth → idempotency（状态件）
+        //    → metrics → cors → compression → panic → request_id → locale
+        //    → trace → access_log → security_headers → body_limit → timeout
+        // CoreState 挂 extension：authz 强制层（required()，路由内层）经此拿强制器
+        let router = router.layer(axum::Extension(self.core.clone()));
+        // 幂等层在 auth 内侧：需要 Identity 把回放缓存按用户隔离（防跨用户回放）
+        let router = router.layer(axum::middleware::from_fn_with_state(
+            self.state.clone(),
+            crate::middleware::idempotency::handle::<S>,
+        ));
+        let router = router.layer(axum::middleware::from_fn_with_state(
+            self.state.clone(),
+            crate::middleware::auth::handle::<S>,
+        ));
+        #[cfg(feature = "csrf")]
+        let router = router.layer(axum::middleware::from_fn_with_state(
+            self.state.clone(),
+            crate::middleware::csrf::handle::<S>,
+        ));
+        #[cfg(feature = "rate-limit")]
+        let router = router.layer(axum::middleware::from_fn_with_state(
+            self.state.clone(),
+            crate::middleware::rate_limit::handle::<S>,
+        ));
+        let router = router.layer(axum::middleware::from_fn_with_state(
+            self.state.clone(),
+            crate::middleware::ip_filter::handle::<S>,
+        ));
+
+        // metrics 计数（MatchedPath 在路由匹配后注入；未匹配路由归一化为固定标签）
+        #[cfg(feature = "metrics")]
+        let router = if metrics_handle.is_some() {
+            router.layer(axum::middleware::from_fn(crate::observability::metrics::track))
         } else {
-            Some(crate::scheduler::start(cron_jobs, scheduler_cache.as_ref()).await?)
+            router
         };
 
-        // 配置热更新（feature = "watch"）：监听线程重载成功后原子切换配置快照，
-        // handler 里 `state.config.load()` 拿到的总是当前生效配置
-        #[cfg(feature = "watch")]
-        if self.watch_override.unwrap_or(cfg.watch.enabled) {
-            let profile = std::env::var("CORE_PROFILE")
-                .ok()
-                .filter(|p| !p.is_empty())
-                .or_else(|| self.profile.clone());
-            Watcher::new(
-                self.config_path.as_deref().unwrap_or("app.yml"),
-                profile,
-                config_watch_handle,
-                on_change,
-            )
-            .spawn();
-            tracing::info!("config hot-reload watcher started");
-        }
+        // 无状态公共层（web/router.rs 推荐位次；locale 在 request_id 之后协商）
+        let router = crate::web::router::assemble_base(
+            router,
+            self.state.clone(),
+            server,
+            settings.service_name(),
+        );
 
-        let addr = format!("{}:{}", cfg.server.host, cfg.server.port);
-        let listener = TcpListener::bind(addr.as_str()).await?;
+        let app = router
+            .with_state(self.state.clone())
+            .into_make_service_with_connect_info::<std::net::SocketAddr>();
+
+        // 6. 监听与优雅停机
+        let addr = format!("{}:{}", server.host, server.port);
+        let server_cfg_shutdown_timeout = server.shutdown_timeout_secs;
+        let listener = tokio::net::TcpListener::bind(addr.as_str()).await?;
         tracing::info!("core-rs application listening on http://{addr}");
 
-        // into_make_service_with_connect_info：handler 可用 ConnectInfo<SocketAddr> 拿客户端地址
-        let server = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown_signal());
-        if cfg.server.shutdown_timeout_secs > 0 {
+        let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+        let result = if server_cfg_shutdown_timeout > 0 {
             // 停机等待超时后强制退出，避免在途请求卡死阻塞滚动发布
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(cfg.server.shutdown_timeout_secs),
-                server,
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(server_cfg_shutdown_timeout), server).await
             {
-                Ok(result) => result?,
+                Ok(result) => result,
                 Err(_) => {
                     tracing::warn!(
-                        secs = cfg.server.shutdown_timeout_secs,
+                        secs = server_cfg_shutdown_timeout,
                         "graceful shutdown timed out, forcing exit"
-                    )
+                    );
+                    // 超时路径同样要收尾后台件：worker 排空退出、调度器停止，
+                    // 否则 memory 队列未 ack 消息直接丢失、在跑的 job 被砍断
+                    if let Some(worker) = worker_runner {
+                        worker.shutdown().await;
+                    }
+                    #[cfg(feature = "scheduler")]
+                    if let Some(mut scheduler) = scheduler {
+                        let _ = scheduler.shutdown().await;
+                    }
+                    return Ok(());
                 }
             }
         } else {
-            server.await?;
+            server.await
+        };
+
+        result?;
+
+        // 7. 后台件收尾
+        if let Some(worker) = worker_runner {
+            worker.shutdown().await;
+        }
+        #[cfg(feature = "scheduler")]
+        if let Some(mut scheduler) = scheduler {
+            let _ = scheduler.shutdown().await;
         }
 
         tracing::info!("core-rs application stopped");

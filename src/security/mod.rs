@@ -1,8 +1,6 @@
-//! 安全模块（feature = "jwt"）：JWT 签发/校验、`CurrentUser` 提取器、argon2 密码哈希。
+//! 防护构件（文档 三·16，配合 middleware）：XSS 清洗、SQL 防注入约定、加密工具。
+//! CSRF 由中间件承担（middleware/csrf.rs），本模块只提供底层原语。
 
-pub mod extractor;
-pub mod jwt;
-pub mod password;
-
-pub use extractor::CurrentUser;
-pub use jwt::{Claims, Jwt};
+pub mod crypto;
+pub mod sql_injection;
+pub mod xss;

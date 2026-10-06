@@ -1,51 +1,59 @@
 //! # core-rs
 //!
-//! Rust 后端快速开发基础框架（starter 型）：一个依赖、一个 yml、十几行 main.rs 起服务。
+//! Rust Web 应用框架（文档 02《Web 应用框架目录结构设计》的实现）：
+//! 集成 axum / SeaORM 2 / 配置热更新 / 中间件 / 认证授权 / 可插拔缓存与队列，
+//! 应用只写业务。
 //!
-//! 薄封装 [axum] + [sea_orm] + Redis，只封装"初始化与胶水"，
-//! 底层类型原样透出，随时可绕过封装直接使用原生 API。
+//! - 入口 [`app::App`]；常用类型统一从 [`prelude`] 导入；
+//! - 解耦点 [`traits`]：应用 AppState 内嵌 [`state::CoreState`] 并实现
+//!   `HasDb / HasCache / HasQueue / HasConfig` 等 trait，框架零侵入；
+//! - 可选能力全部 feature 门控（默认仅 `cache-memory` + `queue-memory` +
+//!   `sqlite` + `migration` + `watch`）：cache-redis / queue-redis /
+//!   queue-rabbitmq / queue-kafka / queue-nats / config-remote / session /
+//!   jwt / oauth2 / casbin / ws / sse / scheduler / i18n / otel /
+//!   rate-limit / csrf / metrics / testing。
 //!
-//! 入口：[`Application`]；常用类型统一从 [`prelude`] 导入。
-//! 可选能力全部 feature 门控：jwt / swagger / metrics / otel / http-client /
-//! scheduler / rate-limit / dist-lock / websocket / upload / cli。
+//! 判断标准一句话：**把项目名换掉、这段代码仍一字不改 → 进框架；
+//! 代码里出现业务词 → 留在应用。**
 
 pub mod app;
+pub mod auth;
+#[cfg(feature = "casbin")]
+pub mod authz;
 pub mod cache;
 pub mod config;
+pub mod db;
+#[cfg(feature = "i18n")]
+pub mod i18n;
 pub mod error;
-pub mod logging;
-pub mod orm;
+pub mod middleware;
+pub mod observability;
 pub mod prelude;
+pub mod queue;
+pub mod realtime;
+pub mod resilience;
+pub mod security;
 pub mod state;
+pub mod task;
+pub mod traits;
+pub mod utils;
 pub mod web;
 
-#[cfg(any(feature = "rate-limit", feature = "dist-lock", feature = "upload"))]
-pub mod extra;
-#[cfg(feature = "http-client")]
-pub mod httpc;
-#[cfg(any(feature = "metrics", feature = "otel"))]
-pub mod observe;
-#[cfg(feature = "queue")]
-pub mod queue;
-#[cfg(feature = "scheduler")]
-pub mod scheduler;
-#[cfg(feature = "jwt")]
-pub mod security;
-#[cfg(feature = "test-util")]
-pub mod test;
+#[cfg(feature = "testing")]
+pub mod testing;
 
-pub use app::{Application, ApplicationBuilder};
+pub use app::{App, FromCore};
 
 // 转发底层能力：下游项目原则上只需依赖 core-rs
-pub use arc_swap;
-pub use axum;
-pub use deadpool_redis;
-pub use sea_orm;
 #[cfg(feature = "migration")]
 pub use sea_orm_migration;
-#[cfg(feature = "swagger")]
-pub use utoipa;
+pub use axum;
+pub use sea_orm;
 pub use serde;
 pub use serde_json;
+pub use tokio;
+pub use tower;
 pub use tracing;
-pub use validator;
+
+/// 版本号（`env!("CARGO_PKG_VERSION")` 的稳定别名）
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

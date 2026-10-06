@@ -1,43 +1,60 @@
 //! 一站式导入：业务项目里 `use core_rs::prelude::*;` 即可拿到全部常用类型，
-//! 包括 axum / sea_orm / serde 等底层 crate 的常用项（下游无需直接依赖它们）。
+//! 包括 axum / sea_orm 等底层 crate 的常用项（下游无需直接依赖它们）。
 
-pub use crate::app::{Application, ApplicationBuilder};
-pub use crate::cache::Cache;
-pub use crate::config::{
-    AppConfig, CacheConfig, CompressionConfig, DatasourceConfig, LogConfig, MemoryConfig,
-    RedisConfig, ServerConfig,
-};
+// 框架核心
+pub use crate::app::{App, FromCore};
 pub use crate::error::{AppError, AppResult};
-pub use crate::orm::crud::{Crud, CrudExt, PkOf};
-pub use crate::orm::page::Page;
-pub use crate::orm::search::{SearchApply, SearchQuery};
-pub use crate::orm::Db;
-pub use crate::state::AppState;
-pub use crate::web::extract::{PageQuery, ValidJson};
-pub use crate::web::response::{ApiResult, ApiResponse, CODE_OK};
+pub use crate::state::CoreState;
+pub use crate::traits::{HasAuth, HasCache, HasConfig, HasDb, HasHealthChecks, HasQueue};
+#[cfg(any(feature = "ws", feature = "sse"))]
+pub use crate::traits::HasRealtime;
 
-#[cfg(feature = "jwt")]
-pub use crate::config::JwtConfig;
-#[cfg(feature = "jwt")]
-pub use crate::security::{Claims, CurrentUser, Jwt};
-#[cfg(feature = "http-client")]
-pub use crate::httpc::HttpClient;
-#[cfg(feature = "otel")]
-pub use crate::config::OtelConfig;
-#[cfg(feature = "queue")]
+// 配置
+pub use crate::config::{
+    self, ConfigHandle, Environment, LoadOptions, OnChange, Settings,
+};
+
+// web 层
+pub use crate::error::ValidationItem;
+pub use crate::web::{
+    ApiResult, ApiResponse, ClientIp, CurrentUser, Page, PageQuery, RequestContext,
+    ValidatedJson, CODE_OK,
+};
+
+// db
+pub use crate::db::{
+    cursor::{CursorPage, CursorQuery},
+    paginate::{PageParams, Paginated},
+    Crud, CrudExt, PkOf,
+};
+
+// cache
+pub use crate::cache::{Cache, CacheError, CacheExt, CacheHandle};
+
+// queue
 pub use crate::queue::{Message as QueueMessage, Queue, QueueError, QueueHandle};
 
+// observability
+pub use crate::observability::{HealthCheck, HealthStatus};
+
+// utils
+pub use crate::utils::snowflake::Snowflake;
+pub use crate::utils::time;
+
+// 底层 crate 常用项（下游无需直接依赖）
 pub use axum::{
     extract::{ConnectInfo, Path, Query, State},
     routing::{delete, get, post, put},
     Json, Router,
 };
+#[cfg(feature = "ws")]
+pub use axum::extract::ws::WebSocketUpgrade;
 pub use chrono;
 pub use sea_orm::{
-    ActiveModelTrait, ActiveValue, ConnectionTrait, ConnectOptions, Database, DatabaseConnection,
-    DbErr, DeriveEntityModel, EntityTrait, PaginatorTrait, QueryFilter, Set,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, ConnectOptions, Database,
+    DatabaseConnection, DbErr, DeriveEntityModel, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, Set, TransactionTrait,
 };
 pub use serde::{Deserialize, Serialize};
 pub use serde_json;
 pub use tracing;
-pub use validator::Validate;
