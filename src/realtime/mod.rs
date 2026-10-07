@@ -8,16 +8,16 @@
 //! - [`message`]：实时消息结构（event / topic / payload），与 `queue::Message`
 //!   保持一致的序列化约定。
 
-pub mod hub;
-pub mod message;
+pub mod hub; // 连接注册表与频道广播模块（所有 feature 下均可用）
+pub mod message; // 实时消息结构模块（event/topic/payload）
 
-#[cfg(feature = "cache-redis")]
-pub mod forward;
+#[cfg(feature = "cache-redis")] // 仅开启 cache-redis 时编译下面的转发模块
+pub mod forward; // 跨实例转发（Redis Pub/Sub）模块
 
-#[cfg(feature = "ws")]
-pub mod websocket;
-#[cfg(feature = "sse")]
-pub mod sse;
+#[cfg(feature = "ws")] // 仅开启 ws feature 时编译 WebSocket 模块
+pub mod websocket; // WebSocket 升级与单连接生命周期模块
+#[cfg(feature = "sse")] // 仅开启 sse feature 时编译 SSE 模块
+pub mod sse; // Server-Sent Events 单向推送模块
 
-pub use hub::Hub;
-pub use message::RealtimeMessage;
+pub use hub::Hub; // 导出 Hub，供框架与应用的 HasRealtime 使用
+pub use message::RealtimeMessage; // 导出 RealtimeMessage，供各推送路径复用

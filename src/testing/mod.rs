@@ -12,6 +12,6 @@
 //! assert_eq!(res.status(), 200);
 //! ```
 
-pub mod app;
+pub mod app; // 声明测试装配器实现子模块（TestApp / TestAppBuilder）
 
-pub use app::{TestApp, TestAppBuilder};
+pub use app::{TestApp, TestAppBuilder}; // 重新导出测试应用与构建器，供集成测试直接使用

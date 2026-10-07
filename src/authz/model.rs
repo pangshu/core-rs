@@ -37,14 +37,14 @@ m = g(r.sub, p.sub, r.dom) && r.dom == p.dom && r.obj == p.obj && r.act == p.act
 "#;
 
 /// 把内置模板写到目标路径（应用初始化 CLI 用）
-pub fn write_default_model(path: &str, multi_tenant: bool) -> std::io::Result<()> {
-    let content = if multi_tenant {
-        RBAC_WITH_DOMAINS_MODEL
-    } else {
-        RBAC_MODEL
+pub fn write_default_model(path: &str, multi_tenant: bool) -> std::io::Result<()> { // 将内置模型模板落盘到指定路径
+    let content = if multi_tenant { // 按是否多租户选择对应模板内容
+        RBAC_WITH_DOMAINS_MODEL // 多租户：选用带 domains 的模型
+    } else { // 非多租户分支
+        RBAC_MODEL // 基础版 RBAC 模型
     };
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(parent)?;
+    if let Some(parent) = std::path::Path::new(path).parent() { // 取目标文件的父目录（可能不存在）
+        std::fs::create_dir_all(parent)?; // 递归创建父目录，避免写文件时目录缺失
     }
-    std::fs::write(path, content)
+    std::fs::write(path, content) // 把选定的模型内容写入目标路径
 }

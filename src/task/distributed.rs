@@ -13,17 +13,17 @@
 //! # }
 //! ```
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::Arc; // 引入 Arc，用于共享锁句柄
+use std::time::Duration; // 引入 Duration，表示选主锁的 TTL
 
-use crate::cache::lock::{Lock, LockError};
+use crate::cache::lock::{Lock, LockError}; // 引入锁 trait 与锁错误类型
 
 /// 尝试以 `name` 选主（TTL 内持有）；返回 None 表示已有主。
 /// `[task].distributed_lock = true` 的 cron 任务自动走此机制（见 task/cron.rs）。
-pub async fn elect_leader(
-    lock: Arc<dyn Lock>,
-    name: &str,
-    ttl: Duration,
-) -> Result<Option<crate::cache::lock::LockGuard>, LockError> {
-    lock.try_acquire(&format!("core-rs:leader:{name}"), ttl).await
+pub async fn elect_leader( // 手动选主：抢到锁者成为 leader
+    lock: Arc<dyn Lock>, // 分布式锁句柄
+    name: &str, // 选主名（同一 name 互斥）
+    ttl: Duration, // 锁持有时间
+) -> Result<Option<crate::cache::lock::LockGuard>, LockError> { // 返回锁守卫；None 表示已有主
+    lock.try_acquire(&format!("core-rs:leader:{name}"), ttl).await // 拼装锁键并尝试非阻塞获取
 }
