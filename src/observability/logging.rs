@@ -3,7 +3,9 @@
 //! 输出目标 stdout +（feature = "log-file"）滚动文件可并存。
 //! feature = "otel" 时将 OpenTelemetry layer 一并挂到订阅链上。
 //!
-//! 进程内重复 init 安全（第二次起为 no-op，测试多次装配不受影响）。
+//! 进程内重复 init 安全：全局订阅链只在首次安装（后续 `set_global_default`
+//! 失败即忽略），滚动文件写入器亦经进程级单例只构造一次、重复装配复用同一份，
+//! 测试多次装配不受影响。
 
 use std::io::Write; // 引入 Write trait，实现自定义日志写入器
 
@@ -154,6 +156,20 @@ fn build_rotating_writer( // 依据配置构造滚动写入器
     }
 }
 
+/// 进程级单例槽：滚动写入器只构造一次，重复 init 复用同一份
+/// （否则每次 init 都会重新 `rotate_rs::open` 同一批日志文件、多起一个后台 worker）
+#[cfg(feature = "log-file")] // 仅在开启 log-file 时编译
+static FILE_WRITER: std::sync::OnceLock<file_writer::SharedRotatingWriter> = // 进程级一次性单例
+    std::sync::OnceLock::new(); // 初始化为空
+
+/// 取得进程内唯一的滚动写入器：首次按 `cfg` 构造，之后一律复用（真正幂等）
+#[cfg(feature = "log-file")] // 仅在开启 log-file 时编译
+fn shared_file_writer( // 返回进程内共享的滚动写入器
+    cfg: &crate::config::sections::FileLogSettings, // 文件日志配置（仅首次生效）
+) -> file_writer::SharedRotatingWriter { // 返回共享写入器
+    FILE_WRITER.get_or_init(|| build_rotating_writer(cfg)).clone() // 首次构造，之后克隆复用
+}
+
 /// 文件输出开关：`RUST_LOG_FILE=1` 环境变量或 `[log.file].enabled`
 #[cfg(feature = "log-file")] // 仅在开启 log-file 时编译
 fn file_enabled(cfg: &Settings) -> bool { // 判断是否启用文件日志
@@ -163,7 +179,8 @@ fn file_enabled(cfg: &Settings) -> bool { // 判断是否启用文件日志
     cfg.log.file.enabled // 否则看配置项
 }
 
-/// 初始化全局 tracing。重复调用安全：已初始化时本进程内为 no-op（返回占位 guard）。
+/// 初始化全局 tracing。重复调用安全：全局订阅链只在首次安装，滚动文件写入器经
+/// 进程级单例复用，后续调用不再产生新的副作用（等价 no-op，返回占位 guard）。
 pub fn init(cfg: &Settings) -> LogGuard { // 初始化日志系统
     let filter = EnvFilter::try_from_default_env() // 优先用 RUST_LOG 环境变量
         .or_else(|_| EnvFilter::try_new(&cfg.log.level)) // 否则用配置的日志级别
@@ -171,7 +188,7 @@ pub fn init(cfg: &Settings) -> LogGuard { // 初始化日志系统
 
     #[cfg(feature = "log-file")] // 仅在开启 log-file 时编译
     let shared_file: Option<file_writer::SharedRotatingWriter> = if file_enabled(cfg) { // 文件日志启用时构造写入器
-        let w = build_rotating_writer(&cfg.log.file); // 构造滚动写入器
+        let w = shared_file_writer(&cfg.log.file); // 复用进程内唯一滚动写入器（只构造一次）
         tracing::info!( // 记录文件轮转已启用
             dir = %cfg.log.file.dir, // 日志目录
             name = %cfg.log.file.name, // 文件名
