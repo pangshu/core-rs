@@ -51,6 +51,11 @@ pub fn load<T: DeserializeOwned>(opts: &LoadOptions) -> Result<T, config::Config
     build_config(opts)?.try_deserialize() // 先构建合并配置再反序列化为目标类型
 }
 
+/// 便捷加载：`load::<Settings>(&LoadOptions::new(env))` 的泛型入口
+pub fn load_with<T: DeserializeOwned>(opts: &LoadOptions) -> Result<T, config::ConfigError> { // 泛型便捷加载函数，返回目标配置类型
+    load(opts) // 委托给 load 完成来源组装与反序列化
+}
+
 pub(crate) fn build_config(opts: &LoadOptions) -> Result<config::Config, config::ConfigError> { // 按优先级组装各配置来源
     let mut builder = config::Config::builder(); // 创建配置构建器
 

@@ -16,6 +16,10 @@ pub struct AuthzSettings { // 授权（Casbin）配置结构
     /// 策略来源：file（开发）| db（生产，经 SeaORM 读 casbin_rule 表）
     #[serde(default = "default_source")] // 缺失时用 default_source 兜底
     pub source: String, // 策略来源类型
+    /// db 来源的物理表名前缀：实际表名 = `{table_prefix}casbin_rule`。
+    /// 由配置在运行时决定，不同业务可配不同前缀（共用同一套代码与连接池）。
+    #[serde(default)] // 缺失时为空前缀（表名即 casbin_rule）
+    pub table_prefix: String, // 策略表名前缀（仅 db 来源生效）
     /// file 来源的策略文件路径
     #[serde(default)] // 缺失时用默认值
     pub file_path: String, // 策略文件路径
@@ -37,6 +41,7 @@ impl Default for AuthzSettings { // 为授权配置实现 Default
             enabled: false, // 默认不启用授权
             model_path: String::new(), // 默认无模型路径
             source: default_source(), // 默认策略来源为 file
+            table_prefix: String::new(), // 默认无表前缀
             file_path: String::new(), // 默认无策略文件路径
             auto_load: default_true_authz(), // 默认开启自动加载
             auto_reload: false, // 默认不启用热更新

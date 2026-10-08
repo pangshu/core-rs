@@ -10,13 +10,12 @@ rust-version = "1.85"
 name = "core_rs"
 
 [features]
-default = ["cache-memory", "queue-memory", "sqlite", "migration", "watch"]
+default = ["cache-memory", "queue-memory", "sqlite", "watch"]
 
 # ---- 数据库（sea-orm 2 运行时后端，默认 sqlite）----
-sqlite = ["sea-orm/sqlx-sqlite", "sea-orm-migration?/sqlx-sqlite"]
-mysql = ["sea-orm/sqlx-mysql", "sea-orm-migration?/sqlx-mysql"]
-postgres = ["sea-orm/sqlx-postgres", "sea-orm-migration?/sqlx-postgres"]
-migration = ["dep:sea-orm-migration"]
+sqlite = ["sea-orm/sqlx-sqlite"]
+mysql = ["sea-orm/sqlx-mysql"]
+postgres = ["sea-orm/sqlx-postgres"]
 
 # ---- 缓存与锁（可插拔后端）----
 cache-memory = ["dep:moka"]
@@ -85,10 +84,6 @@ sea-orm = { version = "2", default-features = false, features = [
     "macros",
     "with-chrono",
     "with-json",
-] }
-sea-orm-migration = { version = "2", optional = true, default-features = false, features = [
-    "runtime-tokio-rustls",
-    "with-chrono",
 ] }
 
 # config

@@ -8,7 +8,7 @@
 //! - 解耦点 [`traits`]：应用 AppState 内嵌 [`state::CoreState`] 并实现
 //!   `HasDb / HasCache / HasQueue / HasConfig` 等 trait，框架零侵入；
 //! - 可选能力全部 feature 门控（默认仅 `cache-memory` + `queue-memory` +
-//!   `sqlite` + `migration` + `watch`）：cache-redis / queue-redis /
+//!   `sqlite` + `watch`）：cache-redis / queue-redis /
 //!   queue-rabbitmq / queue-kafka / queue-nats / config-remote / session /
 //!   jwt / oauth2 / casbin / ws / sse / scheduler / i18n / otel /
 //!   rate-limit / csrf / metrics / testing。
@@ -45,8 +45,6 @@ pub mod testing; // 测试辅助模块（TestApp 等）
 pub use app::{App, FromCore}; // 在 crate 根重导出入口类型，便于 `core_rs::App`
 
 // 转发底层能力：下游项目原则上只需依赖 core-rs
-#[cfg(feature = "migration")] // 仅在开启 migration feature 时转发
-pub use sea_orm_migration; // 转发迁移库，供应用编写迁移
 pub use axum; // 转发 axum
 pub use sea_orm; // 转发 sea_orm
 pub use serde; // 转发 serde

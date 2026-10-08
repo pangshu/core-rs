@@ -1,17 +1,41 @@
 //! Casbin 策略存储适配（文档 三·14）：文件（开发）或 DB（生产，经 SeaORM 读
 //! `casbin_rule` 表）。[`DbOrFileAdapter`] 按 `[authz].source` 装配，
 //! 两者对 Casbin 暴露同一 [`Adapter`] 契约，支持策略热更新（reload）。
+//!
+//! **表名前缀**：db 来源的物理表名 = `[authz].table_prefix` + `casbin_rule`，
+//! 由配置在运行时决定（同一套代码与连接池，不同业务配不同前缀）。因此 DB 读写
+//! 全部经 sea-query **运行时拼表名**，不依赖 `#[sea_orm(table_name = ...)]`
+//! 生成的 `Entity::TABLE`（那是编译期常量，无法按配置变化）。
 
-use sea_orm::entity::prelude::*; // 引入 SeaORM 实体派生所需宏与类型（DeriveEntityModel 等）
+use sea_orm::entity::prelude::*; // 引入 SeaORM 实体派生宏与列标识（Column）等
+use sea_orm::sea_query::{Expr, ExprTrait, Order, Query, TableName, TableRef}; // 引入运行时 SQL 构建类型
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, TransactionTrait}; // 引入连接/事务/错误类型
 use casbin::error::AdapterError; // 引入 Casbin 适配器错误类型，用于包装底层 IO 错误
 use casbin::{Adapter, Error as CasbinError, FileAdapter, Model as CasbinModel, Result as CasbinResult}; // 引入 Casbin 适配器 trait、错误/结果别名、文件适配器与模型 trait
-use sea_orm::{ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, QueryOrder, Set, TransactionTrait}; // 引入 SeaORM 查询/条件/连接/事务等类型
 
-use crate::config::sections::AuthzSettings; // 引入 [authz] 配置段，用于选择策略来源与路径
+use crate::config::sections::AuthzSettings; // 引入 [authz] 配置段，用于选择策略来源、路径与表前缀
 
-/// `casbin_rule` 表实体（通用策略表，无业务词汇；建表迁移由应用侧提供）
+/// Casbin 策略表的**基名**（无前缀）：物理表名 = `[authz].table_prefix` + 该基名。
+///
+/// 适配器与（应用侧）建表迁移共用此常量，避免命名规则两处硬编码而漂移。
+pub const CASBIN_TABLE_BASE: &str = "casbin_rule";
+
+/// 按前缀计算 Casbin 策略表的物理表名（适配器与建表迁移共用同一命名规则）。
+pub fn casbin_table_name(prefix: &str) -> String { // 供应用侧迁移构造与适配器一致的表名
+    format!("{prefix}{CASBIN_TABLE_BASE}") // 前缀 + 基名
+}
+
+/// `casbin_rule` 表实体：仅用于列标识（`Column::*`）与行结构（`Model`）。
+///
+/// 物理表名由运行时前缀决定（见 [`DbAdapter::table`]），故本模块的 DB 读写**不走**
+/// `Entity::find()` 等（它们固定使用编译期常量 `Entity::TABLE`），而是用 sea-query
+/// 按前缀动态拼名。
+///
+/// 注意：`#[sea_orm(table_name = ...)]` 是 `DeriveEntityModel` 的**必需属性**（缺了
+/// 宏不生成 `Entity`，直接编译失败），其值只能是字面量（无法引用 [`CASBIN_TABLE_BASE`]），
+/// 因此这里保持与基名一致的字面量；运行时表名请一律走 [`casbin_table_name`]。
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)] // 派生克隆/比较并生成 SeaORM 实体模型
-#[sea_orm(table_name = "casbin_rule")] // 指定实体对应的数据库表名为 casbin_rule
+#[sea_orm(table_name = "casbin_rule")] // 必需属性：值须等于 CASBIN_TABLE_BASE（宏只接受字面量）
 pub struct Model { // 策略行实体：ptype 加 6 个通用值列
     #[sea_orm(primary_key, auto_increment = true)] // 主键列，自增
     pub id: i64, // 自增主键
@@ -56,17 +80,30 @@ fn row_to_rule(ptype: &str, v: &[V]) -> Option<(String, Vec<String>)> { // 把�
     }
 }
 
-fn active_row(ptype: &str, rule: &[String]) -> ActiveModel { // 把一条策略规则构造成可插入的 ActiveModel
+/// 把一条策略规则铺开成插入用的列表达式（ptype + 6 个值列，顺序与表列一致）
+fn row_values(ptype: &str, rule: &[String]) -> Vec<Expr> { // 生成 INSERT 一行所需的表达式列表
     let (v0, v1, v2, v3, v4, v5) = rule_values(rule); // 先把规则铺开成 6 个值列
-    ActiveModel { // 构造插入用的活动模型
-        id: Default::default(), // 主键交给数据库自增
-        ptype: Set(ptype.to_string()), // 设置策略类型
-        v0: Set(v0), // 设置值列 0
-        v1: Set(v1), // 设置值列 1
-        v2: Set(v2), // 设置值列 2
-        v3: Set(v3), // 设置值列 3
-        v4: Set(v4), // 设置值列 4
-        v5: Set(v5), // 设置值列 5
+    vec![ // 按 (ptype, v0..v5) 顺序构造 7 个值表达式
+        Expr::val(ptype.to_string()), // 策略类型
+        Expr::val(v0), // 值列 0（Option → NULL）
+        Expr::val(v1), // 值列 1
+        Expr::val(v2), // 值列 2
+        Expr::val(v3), // 值列 3
+        Expr::val(v4), // 值列 4
+        Expr::val(v5), // 值列 5
+    ]
+}
+
+/// 由运行时表名构造 sea-query 的 `TableRef`（标识符会被后端自动加引号）
+fn table_ref(table: &str) -> TableRef { // 把字符串表名转成可用的表引用
+    TableRef::Table(TableName(None, table.to_string().into()), None) // 无 schema，仅表名（运行时前缀已拼好）
+}
+
+/// 可空列等值条件：Some 走 `= ?`，None 走 `IS NULL`（与 SeaORM `ColumnTrait::eq` 语义一致）
+fn nullable_eq(col: Column, v: Option<String>) -> Expr { // 针对可空值列生成匹配表达式
+    match v { // 按值是否为空分派
+        Some(s) => Expr::col(col).eq(Expr::val(s)), // 有值：等值匹配
+        None => Expr::col(col).is_null(), // 空值：IS NULL 匹配（不能用 = NULL）
     }
 }
 
@@ -95,7 +132,10 @@ impl DbOrFileAdapter { // 适配器的装配与注入逻辑
                 }
                 Ok(Self::File(FileAdapter::new(settings.file_path.clone()))) // 用配置路径构造文件适配器
             }
-            "db" => Ok(Self::Db(Box::new(DbAdapter { db: None }))), // 数据库来源：先返回空连接适配器，待 set_db 注入
+            "db" => Ok(Self::Db(Box::new(DbAdapter { // 数据库来源：按配置前缀拼出物理表名
+                db: None, // 连接暂缺，待 set_db 注入
+                table: casbin_table_name(&settings.table_prefix), // 运行时表名 = 前缀 + 基名（与迁移共用规则）
+            }))),
             other => Err(crate::error::AppError::internal(format!( // 未知来源：报配置错误
                 "unknown authz.source: {other} (expected file / db)" // 错误信息：提示只支持 file / db
             ))),
@@ -206,10 +246,11 @@ impl Adapter for DbOrFileAdapter { // 实现 Casbin 的 Adapter 契约
     }
 }
 
-/// DB 策略存储（生产）：casbin_rule 表 CRUD。连接由 [`DbOrFileAdapter::set_db`]
-/// 注入（配置加载早于连接池建立）。
+/// DB 策略存储（生产）：按运行时表名对 `{prefix}casbin_rule` 表做 CRUD。
+/// 连接由 [`DbOrFileAdapter::set_db`] 注入（配置加载早于连接池建立）。
 pub struct DbAdapter { // 基于 SeaORM 的数据库策略适配器
     pub db: Option<DatabaseConnection>, // 数据库连接，装配后由 set_db 注入，可能暂为 None
+    pub table: String, // 运行时物理表名（= [authz].table_prefix + casbin_rule）
 }
 
 fn db_err(e: DbErr) -> CasbinError { // 把 SeaORM 错误转换为 Casbin 错误
@@ -236,19 +277,32 @@ impl Adapter for DbAdapter { // 实现 Casbin 的 Adapter 契约（数据库版�
         false // 数据库适配器不支持过滤，恒为 false
     }
 
-    async fn load_policy(&mut self, m: &mut dyn CasbinModel) -> CasbinResult<()> { // 从 casbin_rule 表全量加载策略
+    async fn load_policy(&mut self, m: &mut dyn CasbinModel) -> CasbinResult<()> { // 从 {prefix}casbin_rule 表全量加载策略
         let conn = conn_or_err(&self.db)?; // 取出数据库连接（未注入则报错）
         m.clear_policy(); // 先清空模型中的旧策略，避免与库中数据叠加
-        let rows = Entity::find() // 构造查询：选择全部策略行
-            .order_by_asc(Column::Id) // 按主键升序，保证策略值列按写入顺序还原
-            .all(conn) // 执行查询取出所有行
-            .await // 等待查询完成
-            .map_err(db_err)?; // 查询失败转 Casbin 错误
+        let mut q = Query::select(); // 构造 SELECT：按运行时表名取全部策略行
+        q.column(Column::Id) // 选主键列
+            .column(Column::Ptype) // 选策略类型列
+            .column(Column::V0) // 选值列 0
+            .column(Column::V1) // 选值列 1
+            .column(Column::V2) // 选值列 2
+            .column(Column::V3) // 选值列 3
+            .column(Column::V4) // 选值列 4
+            .column(Column::V5) // 选值列 5
+            .from(table_ref(&self.table)) // 来源为运行时前缀表
+            .order_by(Column::Id, Order::Asc); // 按主键升序，保证值列按写入顺序还原
+        let rows = conn.query_all(&q).await.map_err(db_err)?; // 执行查询取出所有行
         for r in &rows { // 遍历每一行策略
-            if let Some((ptype, rule)) = row_to_rule( // 把行还原成 (策略类型, 规则)
-                &r.ptype, // 该行的策略类型
-                &[r.v0.clone(), r.v1.clone(), r.v2.clone(), r.v3.clone(), r.v4.clone(), r.v5.clone()], // 6 个值列拼成数组
-            ) { // 仅当行有效时
+            let ptype: String = r.try_get_by_index(1).map_err(db_err)?; // 第 2 列（下标 1）为策略类型
+            let v: [V; 6] = [ // 第 3..8 列（下标 2..8）为 6 个值列
+                r.try_get_by_index(2).map_err(db_err)?, // 值列 0
+                r.try_get_by_index(3).map_err(db_err)?, // 值列 1
+                r.try_get_by_index(4).map_err(db_err)?, // 值列 2
+                r.try_get_by_index(5).map_err(db_err)?, // 值列 3
+                r.try_get_by_index(6).map_err(db_err)?, // 值列 4
+                r.try_get_by_index(7).map_err(db_err)?, // 值列 5
+            ];
+            if let Some((ptype, rule)) = row_to_rule(&ptype, &v) { // 把行还原成 (策略类型, 规则)
                 m.add_policy(sec_of(&ptype), &ptype, rule); // 把策略加入模型对应段
             }
         }
@@ -258,25 +312,40 @@ impl Adapter for DbAdapter { // 实现 Casbin 的 Adapter 契约（数据库版�
     async fn save_policy(&mut self, m: &mut dyn CasbinModel) -> CasbinResult<()> { // 把模型中的策略全量写回数据库
         let conn = conn_or_err(&self.db)?; // 取出数据库连接
 
-        // 先在事务外读出全部规则，再在事务内 清空+写回：casbin_rule 是授权唯一
-        // 真相源，中途失败绝不能把表清成空（否则 reload 后全站 403）
-        let mut all = Vec::new(); // 收集待写回的全部策略行
+        // 先在事务外读出全部规则，再在事务内 清空+写回：{prefix}casbin_rule 是授权
+        // 唯一真相源，中途失败绝不能把表清成空（否则 reload 后全站 403）
+        let mut all: Vec<Vec<Expr>> = Vec::new(); // 收集待写回的全部策略行（每行 7 个列表达式）
         let model = m.get_model(); // 取出模型内部结构以遍历策略
         for sec in ["p", "g"] { // 遍历策略段 p（权限）与 g（角色继承）
             if let Some(map) = model.get(sec) { // 若该段存在
                 for (ptype, ast) in map { // 遍历该段下每种策略类型及其断言
                     for rule in ast.policy.iter() { // 遍历该类型下的每条规则
-                        all.push(active_row(ptype, rule)); // 转成 ActiveModel 收集起来
+                        all.push(row_values(ptype, rule)); // 转成一行列表达式收集起来
                     }
                 }
             }
         }
 
+        let table = self.table.clone(); // 克隆表名以移入事务闭包
         conn.transaction(move |txn| { // 开启事务，保证清空与写回的原子性
             Box::pin(async move { // 把异步块装箱为事务回调要求的 Future
-                Entity::delete_many().exec(txn).await?; // 事务内先清空整张表
+                let mut del = Query::delete(); // 构造删除语句
+                del.from_table(table_ref(&table)); // 目标为运行时前缀表
+                txn.execute(&del).await?; // 事务内先清空整张表
                 if !all.is_empty() { // 若有规则待写入
-                    Entity::insert_many(all).exec(txn).await?; // 事务内批量插入全部策略
+                    let mut ins = Query::insert(); // 构造批量插入语句
+                    ins.into_table(table_ref(&table)) // 目标为运行时前缀表
+                        .columns([ // 固定列顺序：ptype + 6 个值列
+                            Column::Ptype, // 策略类型
+                            Column::V0, // 值列 0
+                            Column::V1, // 值列 1
+                            Column::V2, // 值列 2
+                            Column::V3, // 值列 3
+                            Column::V4, // 值列 4
+                            Column::V5, // 值列 5
+                        ])
+                        .values_from_panic(all); // 批量写入全部策略行
+                    txn.execute(&ins).await?; // 事务内执行批量插入
                 }
                 Ok::<(), DbErr>(()) // 显式标注成功类型，便于错误转换
             })
@@ -286,18 +355,29 @@ impl Adapter for DbAdapter { // 实现 Casbin 的 Adapter 契约（数据库版�
         Ok(()) // 保存完成
     }
 
-    async fn clear_policy(&mut self) -> CasbinResult<()> { // 清空 casbin_rule 表
+    async fn clear_policy(&mut self) -> CasbinResult<()> { // 清空 {prefix}casbin_rule 表
         let conn = conn_or_err(&self.db)?; // 取出数据库连接
-        Entity::delete_many().exec(conn).await.map_err(db_err)?; // 删除表中全部行
+        let mut q = Query::delete(); // 构造删除语句
+        q.from_table(table_ref(&self.table)); // 目标为运行时前缀表
+        conn.execute(&q).await.map_err(db_err)?; // 删除表中全部行
         Ok(()) // 清空完成
     }
 
     async fn add_policy(&mut self, _sec: &str, ptype: &str, rule: Vec<String>) -> CasbinResult<bool> { // 向表中新增单条策略
         let conn = conn_or_err(&self.db)?; // 取出数据库连接
-        Entity::insert(active_row(ptype, &rule)) // 把规则转成 ActiveModel 并构造插入
-            .exec(conn) // 在连接上执行插入
-            .await // 等待插入完成
-            .map_err(db_err)?; // 插入失败转 Casbin 错误
+        let mut q = Query::insert(); // 构造插入语句
+        q.into_table(table_ref(&self.table)) // 目标为运行时前缀表
+            .columns([ // 固定列顺序：ptype + 6 个值列
+                Column::Ptype, // 策略类型
+                Column::V0, // 值列 0
+                Column::V1, // 值列 1
+                Column::V2, // 值列 2
+                Column::V3, // 值列 3
+                Column::V4, // 值列 4
+                Column::V5, // 值列 5
+            ])
+            .values_panic(row_values(ptype, &rule)); // 写入该规则的一行
+        conn.execute(&q).await.map_err(db_err)?; // 在连接上执行插入
         Ok(true) // 插入成功，返回 true
     }
 
@@ -308,9 +388,21 @@ impl Adapter for DbAdapter { // 实现 Casbin 的 Adapter 契约（数据库版�
         rules: Vec<Vec<String>>, // 待新增的规则列表
     ) -> CasbinResult<bool> { // 返回是否成功
         let conn = conn_or_err(&self.db)?; // 取出数据库连接
-        let models: Vec<ActiveModel> = rules.iter().map(|r| active_row(ptype, r)).collect(); // 把每条规则转成 ActiveModel
-        if !models.is_empty() { // 若存在待插入行
-            Entity::insert_many(models).exec(conn).await.map_err(db_err)?; // 批量插入全部策略行
+        let rows: Vec<Vec<Expr>> = rules.iter().map(|r| row_values(ptype, r)).collect(); // 把每条规则转成一行列表达式
+        if !rows.is_empty() { // 若存在待插入行
+            let mut q = Query::insert(); // 构造批量插入语句
+            q.into_table(table_ref(&self.table)) // 目标为运行时前缀表
+                .columns([ // 固定列顺序：ptype + 6 个值列
+                    Column::Ptype, // 策略类型
+                    Column::V0, // 值列 0
+                    Column::V1, // 值列 1
+                    Column::V2, // 值列 2
+                    Column::V3, // 值列 3
+                    Column::V4, // 值列 4
+                    Column::V5, // 值列 5
+                ])
+                .values_from_panic(rows); // 批量写入全部策略行
+            conn.execute(&q).await.map_err(db_err)?; // 执行批量插入
         }
         Ok(true) // 返回成功
     }
@@ -318,18 +410,17 @@ impl Adapter for DbAdapter { // 实现 Casbin 的 Adapter 契约（数据库版�
     async fn remove_policy(&mut self, _sec: &str, ptype: &str, rule: Vec<String>) -> CasbinResult<bool> { // 按各列精确匹配删除单条策略
         let conn = conn_or_err(&self.db)?; // 取出数据库连接
         let (v0, v1, v2, v3, v4, v5) = rule_values(&rule); // 把规则铺开成 6 个值列用于匹配
-        let res = Entity::delete_many() // 构造删除查询
-            .filter(Column::Ptype.eq(ptype)) // 条件：策略类型匹配
-            .filter(Column::V0.eq(v0)) // 条件：值列 0 匹配
-            .filter(Column::V1.eq(v1)) // 条件：值列 1 匹配
-            .filter(Column::V2.eq(v2)) // 条件：值列 2 匹配
-            .filter(Column::V3.eq(v3)) // 条件：值列 3 匹配
-            .filter(Column::V4.eq(v4)) // 条件：值列 4 匹配
-            .filter(Column::V5.eq(v5)) // 条件：值列 5 匹配
-            .exec(conn) // 在连接上执行删除
-            .await // 等待删除完成
-            .map_err(db_err)?; // 删除失败转 Casbin 错误
-        Ok(res.rows_affected > 0) // 有行被删除则返回 true
+        let mut q = Query::delete(); // 构造删除语句
+        q.from_table(table_ref(&self.table)) // 目标为运行时前缀表
+            .and_where(Expr::col(Column::Ptype).eq(Expr::val(ptype.to_string()))) // 条件：策略类型匹配
+            .and_where(nullable_eq(Column::V0, v0)) // 条件：值列 0 匹配（空值走 IS NULL）
+            .and_where(nullable_eq(Column::V1, v1)) // 条件：值列 1 匹配
+            .and_where(nullable_eq(Column::V2, v2)) // 条件：值列 2 匹配
+            .and_where(nullable_eq(Column::V3, v3)) // 条件：值列 3 匹配
+            .and_where(nullable_eq(Column::V4, v4)) // 条件：值列 4 匹配
+            .and_where(nullable_eq(Column::V5, v5)); // 条件：值列 5 匹配
+        let res = conn.execute(&q).await.map_err(db_err)?; // 在连接上执行删除
+        Ok(res.rows_affected() > 0) // 有行被删除则返回 true
     }
 
     async fn remove_policies( // 批量删除策略
@@ -353,7 +444,9 @@ impl Adapter for DbAdapter { // 实现 Casbin 的 Adapter 契约（数据库版�
         field_values: Vec<String>, // 各字段的匹配值
     ) -> CasbinResult<bool> { // 返回是否有行被删除
         let conn = conn_or_err(&self.db)?; // 取出数据库连接
-        let mut cond = Condition::all().add(Column::Ptype.eq(ptype)); // 基础条件：策略类型匹配
+        let mut q = Query::delete(); // 构造删除语句
+        q.from_table(table_ref(&self.table)); // 目标为运行时前缀表
+        q.and_where(Expr::col(Column::Ptype).eq(Expr::val(ptype.to_string()))); // 基础条件：策略类型匹配
         for (i, value) in field_values.iter().enumerate() { // 遍历每个字段值，下标 i 为相对偏移
             if value.is_empty() { // 空值表示该字段不参与过滤
                 continue; // 跳过空值
@@ -367,13 +460,9 @@ impl Adapter for DbAdapter { // 实现 Casbin 的 Adapter 契约（数据库版�
                 5 => Column::V5, // 下标 5 对应 v5
                 _ => break, // 超出列范围则停止（无更多可匹配列）
             };
-            cond = cond.add(col.eq(value.clone())); // 追加该列的等值条件
+            q.and_where(Expr::col(col).eq(Expr::val(value.clone()))); // 追加该列的等值条件
         }
-        let res = Entity::delete_many() // 构造删除查询
-            .filter(cond) // 应用累积的过滤条件
-            .exec(conn) // 在连接上执行删除
-            .await // 等待删除完成
-            .map_err(db_err)?; // 删除失败转 Casbin 错误
-        Ok(res.rows_affected > 0) // 有行被删除则返回 true
+        let res = conn.execute(&q).await.map_err(db_err)?; // 在连接上执行删除
+        Ok(res.rows_affected() > 0) // 有行被删除则返回 true
     }
 }

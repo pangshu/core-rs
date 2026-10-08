@@ -142,3 +142,18 @@ fn fluent_langid(locale: &Locale) -> unic_langid::LanguageIdentifier { // 把 Lo
         .parse::<unic_langid::LanguageIdentifier>() // 解析为 LanguageIdentifier
         .unwrap_or_else(|_| "en".parse().expect("static langid")) // 解析失败回落到 en（静态串必然可解析）
 }
+
+/// `AppError` 消息翻译（响应阶段调用）：查 `error.{code}` 键，未命中返回 None
+/// （调用方回退原始 message）
+pub fn translate_error_message( // 按错误码翻译错误消息
+    translator: &Translator, // 翻译器实例
+    locale: &Locale, // 目标语言
+    code: i32, // 错误码
+    fallback: &str, // 翻译未命中时的原始消息
+) -> Option<String> { // 返回翻译结果，恒为 Some
+    let key = format!("error-{code}"); // 组装 FTL 约定键名 error-{code}
+    translator.translate(locale, &key, &[]).or_else(|| { // 先查翻译，未命中则走回退分支
+        // 未命中回退原始消息（i18n 缺失不阻塞错误输出）
+        Some(fallback.to_string())
+    })
+}

@@ -11,6 +11,7 @@ mod i18n; // 国际化配置节模块
 mod log; // 日志配置节模块
 mod queue; // 消息队列配置节模块
 mod realtime; // 实时通信配置节模块
+mod redact; // 连接串脱敏工具（各节手写 Debug 共用）
 mod resilience; // 弹性（熔断/重试/降级）配置节模块
 mod server; // HTTP 服务配置节模块
 mod task; // 定时任务配置节模块
@@ -33,17 +34,4 @@ pub use server::{ // 导出 HTTP 服务相关配置类型
 };
 pub use task::{JobSettings, TaskSettings}; // 导出定时任务相关配置类型
 
-/// 连接串脱敏（各配置节手写 `Debug` 用）：`scheme://user:pass@host/db` →
-/// `scheme://***@host/db`。Settings 及各节大量派生 `#[derive(Debug)]`，
-/// 任何一处 `{:?}` 都会把 DB 密码 / JWT secret 打进日志——含敏感字段的节
-/// 一律手写 Debug 并经过这里。
-pub(crate) fn redact_url(url: &str) -> String { // 对连接串中的凭据做脱敏
-    match url.split_once("://") { // 先按协议分隔符切分
-        Some((scheme, rest)) => match rest.split_once('@') { // 有协议时再按 @ 切分凭据与主机
-            Some((_, host)) => format!("{scheme}://***@{host}"), // 有凭据则用 *** 替换用户名密码
-            None => url.to_string(), // 无凭据则原样返回
-        },
-        None if url.is_empty() => String::new(), // 空串返回空串
-        None => "***".to_string(), // 无法解析的非空串整体脱敏为 ***
-    }
-}
+pub(crate) use redact::redact_url; // 供各配置节手写 Debug 时脱敏连接串

@@ -5,6 +5,9 @@ use std::time::Duration; // 引入 Duration，表示退避时长
 use crate::config::sections::ResiliencePolicy; // 引入弹性策略（重试次数/退避参数）
 use crate::resilience::ResilienceError; // 引入弹性错误类型
 
+/// 时长别名（retry 退避计算用）
+pub type Backoff = Duration; // 把 Duration 别名为 Backoff，表达退避时长语义
+
 /// 按策略重试包裹调用（重试期间每次都是全新 `f()` 调用）。
 /// 所有错误一律重试——`max_retries` 放大请求量，上游返回 4xx 类明确拒绝时
 /// 请改用 [`with_retry_when`] 只对可重试错误重试。

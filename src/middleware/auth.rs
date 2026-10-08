@@ -2,8 +2,9 @@
 //! 填充 `RequestContext.identity`。
 //!
 //! 认证**不拦截**：匿名请求照常放行，登录态要求由 `CurrentUser` 提取器
-//! （401）与 `authz` 层（403）承担；或开启 `[auth] require_auth_by_default`
-//! 后由 [`require_identity`] 兜底（P1-9）。凭据无效（如 token 过期）则立即 401。
+//! （401）与 `authz` 层（403）承担；需要「整棵子树默认要求登录态」时，由
+//! **应用**在挂载前自挂 [`require_identity_layer`]——框架不做路由分类，
+//! `App::mount` 不会自动套本层。凭据无效（如 token 过期）则立即 401。
 //!
 //! 依赖锚点：经请求 extension 读取 `CoreState`（`App::serve` 挂在最外层；
 //! 裸模式自组装时同样由框架必需件保证存在，缺扩展时 500 fail-closed）。
@@ -16,8 +17,8 @@ use crate::state::CoreState; // 引入框架核心状态（依赖锚点）
 use crate::traits::HasAuth; // 引入状态能力 trait：取认证器
 
 /// 受保护路由的兜底：要求请求已携带 Identity（由 auth 中间件在外侧注入），
-/// 无凭据 401。默认模式下 `require_auth_by_default = true` 时由 `App::serve`
-/// 自动挂在 `.mount()` 的路由子树上；裸模式自组装用 [`require_identity_layer`]。
+/// 无凭据 401。由**应用**在需要登录态的子树/路由上自挂（[`require_identity_layer`]）——
+/// 框架不做路由分类，`App::mount` 不会自动套本层。
 ///
 /// **fail-closed**：本层只查 extension、自己不做认证——必须把 auth 中间件挂在
 /// 本层**外侧**，否则无人注入 Identity，受保护路由一律 401（而绝不会静默公开）。
@@ -57,8 +58,12 @@ pub fn layer() -> super::BoxedLayer { // 返回装箱的认证层
     super::BoxedLayer::new(axum::middleware::from_fn(handle)) // 装箱屏蔽具体层类型
 }
 
-/// 自组装用层（裸模式）：受保护子树的登录态兜底（无 Identity 401）。
-/// 须挂在 [`layer`] 的内侧。
+/// 受保护子树的登录态兜底（无 Identity 401）。须挂在 [`layer`] 的内侧。
+///
+/// 默认模式下框架已在最外圈挂 [`layer`]（注入 Identity），应用只需在受保护
+/// 子树上挂本层：`tree.layer(require_identity_layer())`。裸骨架模式
+/// （`App::bare`）下没有全局 auth，须自己按「内 → 外」挂：
+/// `.layer(require_identity_layer()).layer(layer())`。
 pub fn require_identity_layer() -> super::BoxedLayer { // 返回装箱的登录态兜底层
     super::BoxedLayer::new(axum::middleware::from_fn(require_identity)) // 装箱屏蔽具体层类型
 }

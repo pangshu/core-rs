@@ -26,13 +26,6 @@ pub struct AuthSettings { // 定义 `[auth]` 配置结构体
     /// 空串 = 不启用认证中间件（Anonymous）。
     #[serde(default)] // 缺省为空串（不启用认证）
     pub mode: String, // 认证方式列表
-    /// **默认要求登录态**（P1-9 兜底开关）：`true` 时 `App::mount()` 挂载的
-    /// 全部路由要求请求携带 Identity（无凭据 401），公开路由用
-    /// `App::mount_public()` 显式声明（框架自挂的 /health /ready /metrics
-    /// 自动公开）。默认 `false` = 现状：登录态由 handler 声明 `CurrentUser`
-    /// 或路由声明 `authz::required()` 决定，忘声明即公开。
-    #[serde(default)] // 缺省为 false
-    pub require_auth_by_default: bool, // 是否默认要求登录态
     #[serde(default)] // 缺省用 JWT 默认值
     pub jwt: JwtSettings, // JWT 参数
     #[serde(default)] // 缺省用会话默认值

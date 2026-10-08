@@ -30,13 +30,6 @@ pub mod watch; // 声明配置热更新监听子模块
 pub use env::Environment; // 对外导出运行环境枚举
 pub use sections::*; // 对外导出全部配置节结构
 pub use settings::{ConfigHandle, OnChange, Settings}; // 对外导出配置根、只读句柄与变更回调类型
-pub use source::{load, LoadOptions}; // 对外导出加载函数与加载选项
+pub use source::{load, load_with, LoadOptions}; // 对外导出加载函数、泛型便捷加载与加载选项
 #[cfg(feature = "watch")] // 仅在开启 watch feature 时编译下面的重导出
 pub use watch::{reload_once, Watcher}; // 对外导出热更新监听器与单次重载函数
-
-use serde::de::DeserializeOwned; // 引入可反序列化 trait，作为泛型加载约束
-
-/// 便捷加载：`load::<Settings>(&LoadOptions::new(env))` 的泛型入口
-pub fn load_with<T: DeserializeOwned>(opts: &LoadOptions) -> Result<T, config::ConfigError> { // 泛型便捷加载函数，返回目标配置类型
-    source::load(opts) // 委托给 source::load 完成来源组装与反序列化
-}

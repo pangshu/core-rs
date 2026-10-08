@@ -29,7 +29,7 @@
 //! App::<AppState>::bootstrap().await?
 //!     .bare()
 //!     .mount(admin)
-//!     .mount_public(stack::common(open_api.layer(rate_limit::layer()), &s.server))
+//!     .mount(stack::common(open_api.layer(rate_limit::layer()), &s.server))
 //!     .serve().await?;
 //! ```
 //!
@@ -40,6 +40,9 @@
 //! 构造器）归代码、生效权归配置，二者解耦且后者支持热更新。
 //!
 //! authz 不在链上：授权走路由级 `required()`（声明即校验，见 middleware/authz.rs）。
+//!
+//! 路由保护由应用决定：`App::mount` 只做合并、不套鉴权层；需要登录态的子树
+//! 请自行 `.layer(auth::require_identity_layer())`（框架不做「公开/受保护」分类）。
 //!
 //! 组合权留应用：挂什么、挂哪层由应用的路由树决定；若偏离推荐顺序，以
 //! 本模块注释为据（硬约束仅两条：request_id 须在 locale/trace/access_log
@@ -64,18 +67,9 @@ pub mod csrf; // CSRF 防护中间件
 #[cfg(feature = "casbin")] // 仅在开启 casbin feature 时编译下面模块
 pub mod authz; // 授权（Casbin 强制器）中间件
 
-/// 自组装用中间件层的统一返回类型：装箱屏蔽 `from_fn` 的具体类型
-/// （含匿名 async fn，无法跨 crate 命名），使 `auth::layer()` 等构造器
-/// 可在业务 crate 直接 `Router::layer()` 使用。用 `BoxCloneSyncServiceLayer`
-/// 而非 `BoxLayer`：后者产出的 `BoxService` 不实现 Clone，过不了
-/// `Router::layer` 的约束。axum 0.8 自身启用 `tower/util`，恒可用；
-/// `Route` 内部本就是动态派发，开销可忽略。
-pub type BoxedLayer = tower::util::BoxCloneSyncServiceLayer< // 装箱层类型别名
-    axum::routing::Route, // 内层服务：axum 路由（Router::layer 的绑定目标）
-    axum::extract::Request, // 请求类型
-    axum::response::Response, // 响应类型
-    core::convert::Infallible, // axum 路由服务不变出错
->;
+mod boxed_layer; // 自组装层统一返回类型（BoxedLayer）
+
+pub use boxed_layer::BoxedLayer; // 对外导出装箱层类型，供各件 layer() 构造器使用
 
 #[cfg(feature = "casbin")] // 仅在开启 casbin feature 时重导出
 pub use authz::{required, required_in, RequiredPermission}; // 重导出路由级授权声明帮手
