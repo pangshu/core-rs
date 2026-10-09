@@ -43,12 +43,12 @@ ws = ["axum/ws"]
 sse = []
 
 # ---- 运维件 ----
-scheduler = ["dep:tokio-cron-scheduler", "dep:chrono-tz"]
+scheduler = ["dep:tokio-cron-scheduler"]
 metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 rate-limit = []
 csrf = []
-i18n = ["dep:fluent", "dep:chrono-tz", "dep:unic-langid"]
+i18n = ["dep:fluent", "dep:unic-langid"]
 log-file = ["dep:rotate-rs"]
 
 # ---- 测试装配器 ----
@@ -101,6 +101,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 garde = { version = "0.20", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
+# 时区常驻依赖：统一的 IANA 时区解析（日志 / cron / 展示换算），
+# 不再挂在 i18n / scheduler 可选 feature 下——时区能力在默认构建下也必须可用
+chrono-tz = "0.10"
 
 # error
 thiserror = "2"
@@ -134,7 +137,6 @@ casbin = { version = "2", optional = true, default-features = false, features = 
 tokio-cron-scheduler = { version = "0.15", optional = true }
 fluent = { version = "0.16", optional = true }
 unic-langid = { version = "0.9", optional = true }
-chrono-tz = { version = "0.10", optional = true }
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.18", optional = true }
 opentelemetry = { version = "0.33", optional = true }

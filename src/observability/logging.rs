@@ -3,6 +3,10 @@
 //! 输出目标 stdout +（feature = "log-file"）滚动文件可并存。
 //! feature = "otel" 时将 OpenTelemetry layer 一并挂到订阅链上。
 //!
+//! **时区**：日志时间戳走统一解析链（`[time].timezone` → 系统时区 → UTC，
+//! 见 `utils::time::resolve_display_tz`）。配置了非法时区名时启动期 fail-fast。
+//! 注意：timer 在 init 时构造，**改时区需重启**（与 watch 的既有语义一致）。
+//!
 //! 进程内重复 init 安全：全局订阅链只在首次安装（后续 `set_global_default`
 //! 失败即忽略），滚动文件写入器亦经进程级单例只构造一次、重复装配复用同一份，
 //! 测试多次装配不受影响。
@@ -12,6 +16,34 @@ use std::io::Write; // 引入 Write trait，实现自定义日志写入器
 use tracing_subscriber::{prelude::*, registry, EnvFilter}; // 引入订阅链组合、registry 与日志级别过滤器
 
 use crate::config::Settings; // 引入全局配置类型
+
+/// 自定义时间戳 timer：按解析链得到的 IANA 时区渲染日志时间。
+///
+/// 走 [`crate::utils::time::resolve_display_tz`]（业务配置 → 系统 → UTC），
+/// 输出带偏移量的 RFC3339（如 `2026-10-09T13:14:01.517+08:00`）。
+/// 纯 UTC 时输出 `Z` 后缀形式，与框架此前的默认行为在语义上等价（UTC 场景下
+/// 字符串形态不同，采集端解析规则需同步）。
+#[derive(Debug, Clone, Copy)] // 派生调试/克隆/拷贝（timer 会被 layer 持有）
+struct TzTimer {
+    /// 已解析出的展示时区
+    tz: chrono_tz::Tz,
+}
+
+impl TzTimer {
+    /// 按解析链构造 timer。已配置但非法的时区名返回错误，由调用方 fail-fast。
+    fn from_settings(cfg: &Settings) -> Result<Self, crate::utils::time::UnknownTimezone> {
+        let tz = crate::utils::time::resolve_display_tz(cfg.time.timezone_name())?; // 走统一解析链
+        Ok(Self { tz }) // 保存解析结果
+    }
+}
+
+impl tracing_subscriber::fmt::time::FormatTime for TzTimer { // 实现 tracing 的时间格式化契约
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        let now = chrono::Utc::now().with_timezone(&self.tz); // 当前时刻换算到展示时区
+        // 毫秒精度 + 带偏移量（false = 不用 Z 缩写，显式输出 +08:00 / +00:00）
+        write!(w, "{}", now.to_rfc3339_opts(chrono::SecondsFormat::Millis, false))
+    }
+}
 
 /// 输出目的地（console / file 共用同一 fmt layer 类型，便于链式组合）：
 /// - `Stdout`：控制台输出（保持 ANSI 着色）；
@@ -182,6 +214,12 @@ fn file_enabled(cfg: &Settings) -> bool { // 判断是否启用文件日志
 /// 初始化全局 tracing。重复调用安全：全局订阅链只在首次安装，滚动文件写入器经
 /// 进程级单例复用，后续调用不再产生新的副作用（等价 no-op，返回占位 guard）。
 pub fn init(cfg: &Settings) -> LogGuard { // 初始化日志系统
+    // 时区解析链：已配置非法时区名 → 启动期 fail-fast（不静默降级）
+    let timer = match TzTimer::from_settings(cfg) { // 按配置解析日志展示时区
+        Ok(t) => t, // 解析成功
+        Err(e) => panic!("log timezone init failed: {e}"), // 非法时区名：fail-fast 终止启动
+    };
+
     let filter = EnvFilter::try_from_default_env() // 优先用 RUST_LOG 环境变量
         .or_else(|_| EnvFilter::try_new(&cfg.log.level)) // 否则用配置的日志级别
         .unwrap_or_else(|_| EnvFilter::new("info")); // 都失败则回落 info
@@ -222,10 +260,16 @@ pub fn init(cfg: &Settings) -> LogGuard { // 初始化日志系统
             let console = cfg // 控制台层（可选）
                 .log // 日志配置
                 .stdout // 是否输出到 stdout
-                .then(|| tracing_subscriber::fmt::layer().json().with_writer(console_sink)); // 开启时构造 JSON 控制台层
+                .then(|| { // 开启时构造 JSON 控制台层
+                    tracing_subscriber::fmt::layer() // fmt 层
+                        .json() // JSON 格式
+                        .with_timer(timer) // 挂自定义时区 timer
+                        .with_writer(console_sink) // 写入控制台目的地
+                });
             let file = tracing_subscriber::fmt::layer() // 文件层
                 .json() // JSON 格式
                 .with_ansi(false) // 关闭 ANSI 着色
+                .with_timer(timer) // 挂自定义时区 timer
                 .with_writer(file_sink); // 写入文件目的地
             mount(cfg, registry().with(console).with(file), filter) // 组装订阅链并挂载
         }
@@ -233,9 +277,14 @@ pub fn init(cfg: &Settings) -> LogGuard { // 初始化日志系统
             let console = cfg // 控制台层（可选）
                 .log // 日志配置
                 .stdout // 是否输出到 stdout
-                .then(|| tracing_subscriber::fmt::layer().with_writer(console_sink)); // 开启时构造默认格式控制台层
+                .then(|| { // 开启时构造默认格式控制台层
+                    tracing_subscriber::fmt::layer() // fmt 层
+                        .with_timer(timer) // 挂自定义时区 timer
+                        .with_writer(console_sink) // 写入控制台目的地
+                });
             let file = tracing_subscriber::fmt::layer() // 文件层
                 .with_ansi(false) // 关闭 ANSI 着色
+                .with_timer(timer) // 挂自定义时区 timer
                 .with_writer(file_sink); // 写入文件目的地
             mount(cfg, registry().with(console).with(file), filter) // 组装订阅链并挂载
         }

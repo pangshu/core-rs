@@ -15,6 +15,7 @@ mod redact; // 连接串脱敏工具（各节手写 Debug 共用）
 mod resilience; // 弹性（熔断/重试/降级）配置节模块
 mod server; // HTTP 服务配置节模块
 mod task; // 定时任务配置节模块
+mod time; // 展示时区配置节模块（可选）
 
 pub use auth::{AuthSettings, JwtSettings, OAuth2Provider, OAuth2Settings, PasswordPolicy, SessionSettings}; // 导出认证相关配置类型
 pub use authz::AuthzSettings; // 导出授权配置类型
@@ -33,5 +34,6 @@ pub use server::{ // 导出 HTTP 服务相关配置类型
     MetricsSettings, RateLimitSettings, SecurityHeadersSettings, ServerSettings, WatchSettings, // 指标/限流/安全头/服务/热更新配置
 };
 pub use task::{JobSettings, TaskSettings}; // 导出定时任务相关配置类型
+pub use time::TimeSettings; // 导出展示时区配置类型
 
 pub(crate) use redact::redact_url; // 供各配置节手写 Debug 时脱敏连接串

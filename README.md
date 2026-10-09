@@ -61,6 +61,7 @@ impl HasDb for AppState { fn db(&self) -> Option<&DatabaseConnection> { self.cor
 | `ws` / `sse` | WebSocket / Server-Sent Events（hub 频道广播，可经 queue 跨实例转发） | — |
 | `scheduler` | cron 定时任务（tokio-cron-scheduler，多实例经 cache/lock 选主） | — |
 | `i18n` | Fluent 多语言 / 时区 / 货币（`{dir}/{locale}.ftl`） | — |
+| `time` | 展示时区（`[time].timezone` 可选；日志/cron/展示解析链） | 常驻 |
 | `metrics` / `otel` | Prometheus `/metrics` / OTLP gRPC 链路导出（`OTEL_EXPORTER_OTLP_ENDPOINT`） | — |
 | `rate-limit` / `csrf` | 固定窗口限流（阈值热更新） / 双提交 Cookie CSRF | — |
 | `config-remote` | 配置中心来源 | — |

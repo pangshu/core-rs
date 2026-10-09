@@ -35,6 +35,8 @@ pub struct Settings { // 框架配置根结构，聚合所有子系统配置节
     #[serde(default)] // 缺失该节时用默认值填充
     pub task: TaskSettings, // 定时任务配置节
     #[serde(default)] // 缺失该节时用默认值填充
+    pub time: TimeSettings, // 展示时区配置节（可选；缺省 = 读系统时区 → UTC）
+    #[serde(default)] // 缺失该节时用默认值填充
     pub resilience: ResilienceSettings, // 弹性（熔断/重试/降级）配置节
     #[serde(default)] // 缺失该节时用默认值填充
     pub i18n: I18nSettings, // 国际化配置节

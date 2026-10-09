@@ -7,6 +7,9 @@
 //!   翻译（[`translate_error_message`]）；
 //! - **存储约定**：时间统一 UTC 入库、展示时按用户时区换算；金额以最小货币
 //!   单位（分）存整数。
+//! - **时区**：展示换算的时区走 `utils::time::resolve_display_tz` 解析链
+//!   （`[i18n].default_timezone` / `[time].timezone` → 系统时区 → UTC），
+//!   框架不预设默认时区。
 
 pub mod format; // 导出日期/时区/货币/数字格式化子模块
 pub mod locale; // 导出 Locale 类型与解析、回退链子模块

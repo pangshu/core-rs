@@ -17,6 +17,21 @@ pub fn format_datetime(dt: DateTime<Utc>, timezone: &str) -> String { // 按目�
     }
 }
 
+/// 走框架时区解析链的展示格式化（`%Y-%m-%d %H:%M:%S`）。
+///
+/// 解析链：`timezone`（业务显式传入，通常来自 `[i18n].default_timezone`）
+/// → `[time].timezone` → 系统时区 → UTC（见
+/// [`crate::utils::time::resolve_display_tz`]）。
+///
+/// 与 [`format_datetime`] 的区别：本函数把"业务未配置"的情况也纳入回退链，
+/// 适合业务层不确定时区是否已配置时直接调用。`timezone` 传空串即表示未配置。
+pub fn format_datetime_default(dt: DateTime<Utc>, timezone: &str) -> String { // 走解析链的展示格式化
+    match crate::utils::time::resolve_display_tz(Some(timezone)) { // 走统一解析链（空串 = 未配置）
+        Ok(tz) => dt.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S").to_string(), // 换算后按固定格式渲染
+        Err(_) => dt.format("%Y-%m-%d %H:%M:%S").to_string(), // 非法时区时按 UTC 渲染（不 panic）
+    }
+}
+
 /// 分（最小货币单位）→ 金额字符串（两位小数），如 `12345` → `"123.45"`。
 /// 千分位与货币符号由前端/展示层追加（避免不同 locale 的符号约定纠缠）。
 pub fn format_minor_units(minor: i64) -> String { // 最小货币单位转金额字符串

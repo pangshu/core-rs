@@ -1,7 +1,9 @@
 //! cron 表达式调度（含时区），基于 tokio-cron-scheduler（6/7 段，秒开头）。
-//! 时区用 IANA 名称（如 `Asia/Shanghai`）；解析失败回落 UTC 并告警。
-
-use std::str::FromStr; // 引入 FromStr，用于把时区字符串解析为 Tz
+//!
+//! 时区解析链（与 `utils::time` 一致）：**任务自身 `timezone` → `[time].timezone`
+//! → 系统时区 → UTC**。任一显式配置了非法 IANA 名时**启动期 fail-fast**——
+//! 静默回落 UTC 会让"每天 3 点跑"悄悄变成"UTC 3 点跑"（北京 11 点），
+//! 与同函数内 cron 表达式非法即报错的策略保持一致。
 
 use tokio_cron_scheduler::Job as TokioJob; // 引入底层调度 Job 类型并重命名避免与框架 Job 冲突
 
@@ -12,7 +14,7 @@ use crate::error::{AppError, AppResult}; // 引入框架错误类型与结果别
 pub(crate) fn make_job<S>( // 构造底层调度 Job（crate 内可见）
     job: &crate::task::Job, // 框架任务定义
     schedule: &str, // cron 表达式
-    timezone: &str, // IANA 时区名
+    timezone: &str, // 任务自身配置的 IANA 时区名（可为空 = 未配置）
     distributed: bool, // 是否启用多实例选主
     state: &S, // 应用状态（提供锁与配置）
 ) -> AppResult<TokioJob> // 返回构造好的底层 Job
@@ -49,40 +51,54 @@ where
                 }
             }) as crate::task::job::JobFuture // 显式转换为框架的 JobFuture 类型
         };
-        return with_timezone(schedule, timezone, move |_uuid, _sched| wrapped()); // 用带时区的方式构造 Job 并返回
+        let tz = resolve_job_tz(timezone, state.config())?; // 解析该任务的调度时区
+        return build_job(schedule, tz, move |_uuid, _sched| wrapped()); // 用解析出的时区构造 Job 并返回
     }
 
-    with_timezone(schedule, timezone, move |_uuid, _sched| f()) // 非选主：直接包装回调并构造 Job
+    let tz = resolve_job_tz(timezone, state.config())?; // 解析该任务的调度时区
+    build_job(schedule, tz, move |_uuid, _sched| f()) // 非选主：直接包装回调并构造 Job
 }
 
-/// 按 IANA 时区名构造调度 Job（解析失败回落 UTC）
-fn with_timezone<F>(schedule: &str, timezone: &str, f: F) -> AppResult<TokioJob> // 按时区构造底层 Job
+/// 解析任务调度时区：**任务自身 → `[time].timezone` → 系统 → UTC**。
+///
+/// 显式配置的时区名解析失败时返回错误（调用方在启动期 fail-fast），
+/// 不再静默回落 UTC。
+fn resolve_job_tz( // 按解析链得到任务调度时区
+    job_timezone: &str, // 任务自身配置的时区名（空 = 未配置）
+    config: &crate::config::ConfigHandle<crate::config::Settings>, // 配置句柄（读 [time].timezone）
+) -> AppResult<chrono_tz::Tz> { // 返回解析结果
+    // 任务自身配置优先：非空且合法即采用；非空但非法直接报错
+    let configured = if job_timezone.trim().is_empty() { // 任务未配置时区
+        let settings = config.load(); // 取配置快照
+        settings.time.timezone_name().map(str::to_owned) // 回退到 [time].timezone（可能仍为 None）
+    } else {
+        Some(job_timezone.trim().to_owned()) // 采用任务自身配置
+    };
+
+    match configured { // 按解析结果分派
+        Some(name) => name.parse::<chrono_tz::Tz>().map_err(|_| { // 显式配置了就必须可解析
+            AppError::internal(format!( // 非法时区名：fail-fast
+                "cron job timezone {name:?} is invalid: 请使用 IANA 时区名（如 \"Asia/Shanghai\"），或留空以使用 [time].timezone / 系统时区"
+            ))
+        }),
+        None => Ok(crate::utils::time::system_tz()), // 完全未配置：系统时区（内部兜底 UTC）
+    }
+}
+
+/// 按 IANA 时区构造调度 Job（时区已解析完毕）
+fn build_job<F>(schedule: &str, tz: chrono_tz::Tz, f: F) -> AppResult<TokioJob> // 用已解析时区构造底层 Job
 where
     F: Fn(uuid_cron::Uuid, tokio_cron_scheduler::JobScheduler) -> crate::task::job::JobFuture // 回调签名与底层调度器一致
         + Send // 可跨线程发送
         + Sync // 可多线程共享
         + 'static, // 不借用短生命周期数据
 {
-    if timezone.is_empty() { // 未指定时区时
-        return TokioJob::new_async(schedule, f) // 用无时区版本构造 Job
-            .map_err(|e| AppError::internal(format!("cron job schedule {schedule:?} invalid: {e}"))); // 表达式非法则转内部错误
-    }
-    match chrono_tz::Tz::from_str(timezone) { // 把时区名解析为 chrono_tz 时区
-        Ok(tz) => { // 解析成功
-            #[allow(clippy::let_unit_value)] // 允许 let 绑定单元值（下面显式忽略返回）
-            let _ = (); // 占位：显式丢弃单元值，避免未使用告警
-            TokioJob::new_async_tz(schedule, tz, f).map_err(|e| { // 用指定时区构造 Job
-                AppError::internal(format!( // 表达式非法时构造内部错误
-                    "cron job schedule {schedule:?} invalid for tz {timezone}: {e}" // 错误消息含表达式与时区
-                ))
-            })
-        }
-        Err(_) => { // 时区名无法解析
-            tracing::warn!(timezone, "unknown IANA timezone, falling back to UTC"); // 告警并回落 UTC
-            TokioJob::new_async(schedule, f) // 用无时区（UTC）版本构造 Job
-                .map_err(|e| AppError::internal(format!("cron job schedule {schedule:?} invalid: {e}"))) // 表达式非法转内部错误
-        }
-    }
+    TokioJob::new_async_tz(schedule, tz, f).map_err(|e| { // 用指定时区构造 Job
+        AppError::internal(format!( // 表达式非法时构造内部错误
+            "cron job schedule {schedule:?} invalid for tz {}: {e}", // 错误消息含表达式与时区名
+            tz.name() // 回显时区名便于排障
+        ))
+    })
 }
 
 /// tokio-cron-scheduler 的 uuid 再导出别名（Job 回调签名用，避免直接依赖其内部路径）
