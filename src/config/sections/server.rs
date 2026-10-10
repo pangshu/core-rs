@@ -62,6 +62,9 @@ pub struct ServerSettings { // 定义 `[server]` 配置段结构体
     /// 配置热更新开关（文档 三·4）
     #[serde(default)] // 缺省时用热更新默认值
     pub watch: WatchSettings, // 配置热更新配置
+    /// 服务端 TLS（feature = "tls"）：HTTPS 监听 / 多域名证书 / 热更新
+    #[serde(default)] // 缺省时用 TLS 默认值
+    pub tls: TlsSettings, // TLS 配置
 }
 
 impl Default for ServerSettings { // 为 ServerSettings 手写默认值实现
@@ -82,6 +85,64 @@ impl Default for ServerSettings { // 为 ServerSettings 手写默认值实现
             compression: FileBodySettings::default(), // 压缩默认配置
             metrics: MetricsSettings::default(), // metrics 默认配置
             watch: WatchSettings::default(), // 热更新默认配置
+            tls: TlsSettings::default(), // TLS 默认配置
+        }
+    }
+}
+
+/// `[server.tls]`（feature = "tls"）：HTTPS 监听 / 多域名证书 / 热更新。
+///
+/// **只放 TLS 行为开关**：证书内容不在配置里，由业务实现 `CertProvider` 提供
+/// （框架不持有证书、不定义存储约定、不内置来源）。
+#[derive(Debug, Clone, Serialize, Deserialize)] // 派生调试/克隆与 serde
+pub struct TlsSettings { // 定义 `[server.tls]` 配置
+    /// 是否启用 HTTPS 监听；关闭时行为与纯 HTTP 完全一致
+    #[serde(default)] // 缺省为 false（默认关闭）
+    pub enabled: bool, // 是否启用 TLS
+    /// 最低 TLS 协议版本："1.2"（默认）| "1.3"
+    #[serde(default = "default_min_tls")] // 缺省为 "1.2"
+    pub min_version: String, // 最低协议版本
+    /// 证书轮询间隔（秒）；缺省 60。0 = 关闭轮询（仅手动 / 目录触发）
+    #[serde(default = "default_refresh_interval")] // 缺省为 60
+    pub refresh_interval_secs: u64, // 轮询间隔（秒）
+    /// 业务指定的 TLS 目录：留空 = 不启用目录模式（不监听、不监控目录）
+    #[serde(default)] // 缺省为空串（不启用）
+    pub dir: String, // 被监听的证书目录（仅作变更触发器）
+    /// 目录变更防抖窗口（毫秒）
+    #[serde(default = "default_debounce_ms")] // 缺省为 300ms
+    pub debounce_ms: u64, // 防抖窗口（毫秒）
+    /// 是否做证书到期监控（注册 /ready 探针）；默认开启
+    #[serde(default = "default_true")] // 缺省为 true（默认开启）
+    pub monitor_expiry: bool, // 是否启用到期监控
+    /// 是否同进程再起一个明文端口做 HTTP → HTTPS 308 跳转（可选，默认关）
+    #[serde(default)] // 缺省为 false（默认关闭）
+    pub redirect_http: bool, // 是否启用 HTTP 跳转
+    /// HTTP 跳转监听端口（`redirect_http = true` 时生效）
+    #[serde(default = "default_redirect_port")] // 缺省为 80
+    pub http_port: u16, // 跳转监听端口
+}
+
+fn default_min_tls() -> String { // 最低 TLS 版本默认值函数
+    "1.2".to_string() // 默认 TLS 1.2
+}
+fn default_refresh_interval() -> u64 { // 轮询间隔默认值函数
+    60 // 默认 60 秒
+}
+fn default_redirect_port() -> u16 { // HTTP 跳转端口默认值函数
+    80 // 默认 80
+}
+
+impl Default for TlsSettings { // 为 TLS 配置手写默认值
+    fn default() -> Self { // 实现 default 方法
+        Self { // 逐字段构造默认实例
+            enabled: false, // 默认关闭
+            min_version: default_min_tls(), // 默认 TLS 1.2
+            refresh_interval_secs: default_refresh_interval(), // 默认 60s
+            dir: String::new(), // 默认不启用目录模式
+            debounce_ms: default_debounce_ms(), // 默认 300ms
+            monitor_expiry: default_true(), // 默认开启到期监控
+            redirect_http: false, // 默认不做 HTTP 跳转
+            http_port: default_redirect_port(), // 默认 80
         }
     }
 }

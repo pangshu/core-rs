@@ -51,6 +51,10 @@ pub use crate::queue::{Message as QueueMessage, Queue, QueueError, QueueHandle};
 // observability
 pub use crate::observability::{HealthCheck, HealthStatus}; // 导出健康探针 trait 与状态枚举
 
+// tls（服务端 TLS 契约）
+#[cfg(feature = "tls")] // 仅在开启 tls feature 时导出
+pub use crate::tls::{CertEntry, CertProvider, TlsState}; // 导出证书来源契约、DTO 与 TLS 状态
+
 // utils
 pub use crate::utils::snowflake::Snowflake; // 导出雪花 ID 生成器
 pub use crate::utils::time; // 导出时间工具模块

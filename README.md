@@ -66,6 +66,7 @@ impl HasDb for AppState { fn db(&self) -> Option<&DatabaseConnection> { self.cor
 | `rate-limit` / `csrf` | 固定窗口限流（阈值热更新） / 双提交 Cookie CSRF | — |
 | `config-remote` | 配置中心来源 | — |
 | `log-file` | rotate-rs 滚动文件日志（大小/时间/混合切割 + gz） | — |
+| `tls` | 服务端 HTTPS：多域名证书（SNI，支持通配符 `*.example.com`）+ 证书热更新 + 到期监控；证书由业务 `CertProvider` 提供 | — |
 | `testing` | `TestApp::new()` 测试装配器 | — |
 
 `cargo check --no-default-features --features "cache-memory,queue-memory,sqlite,…" ` 按需组合。
@@ -103,6 +104,7 @@ src/
 ├── auth/ authz/                    # session·jwt·oauth2·password / Casbin RBAC
 ├── cache/ queue/                   # 可插拔后端（trait + 工厂）
 ├── task/ resilience/ realtime/     # cron 调度 · 熔断重试降级舱壁 · WS/SSE
+├── tls/                            # 服务端 HTTPS（证书仓库 / SNI resolver / 热更新 / 到期探针）
 ├── i18n/ observability/ security/  # 多语言 / 日志·追踪·健康·指标 / XSS·SQL·加密
 └── testing/                        # TestApp 测试装配器
 examples/demo/                      # 使用说明书：CRUD + 登录 + 队列 + 四环境配置（公开树/受保护树示范）

@@ -31,7 +31,7 @@ pub use realtime::RealtimeSettings; // 导出实时通信配置类型
 pub use resilience::{ResiliencePolicy, ResilienceSettings}; // 导出弹性策略与弹性配置类型
 pub use server::{ // 导出 HTTP 服务相关配置类型
     CorsSettings, CsrfSettings, FileBodySettings, IdempotencySettings, IpFilterSettings, // 跨域/CSRF/文件体/幂等/IP 过滤配置
-    MetricsSettings, RateLimitSettings, SecurityHeadersSettings, ServerSettings, WatchSettings, // 指标/限流/安全头/服务/热更新配置
+    MetricsSettings, RateLimitSettings, SecurityHeadersSettings, ServerSettings, TlsSettings, WatchSettings, // 指标/限流/安全头/服务/TLS/热更新配置
 };
 pub use task::{JobSettings, TaskSettings}; // 导出定时任务相关配置类型
 pub use time::TimeSettings; // 导出展示时区配置类型

@@ -81,6 +81,8 @@ pub struct App<S> { // 泛型参数 S 为应用状态类型（内嵌 CoreState�
     consumers: Vec<(String, Handler)>, // 待注册的队列消费任务（topic 与处理函数）
     #[cfg(feature = "scheduler")] // 仅在开启 scheduler feature 时编译下面字段
     jobs: Vec<crate::task::Job>, // 待注册的定时任务集合
+    #[cfg(feature = "tls")] // 仅在开启 tls feature 时编译下面字段
+    cert_provider: Option<Arc<dyn crate::tls::CertProvider>>, // 业务注册的证书来源
 }
 
 impl<S> App<S> // 为 App<S> 实现装配方法
@@ -120,6 +122,8 @@ where // 以下是 S 必须满足的 trait 上界
             consumers: Vec::new(), // 消费任务初始为空
             #[cfg(feature = "scheduler")] // 仅在开启 scheduler 时初始化 jobs
             jobs: Vec::new(), // 定时任务初始为空
+            #[cfg(feature = "tls")] // 仅在开启 tls 时初始化
+            cert_provider: None, // 证书来源初始未注册
         }
     }
 
@@ -186,9 +190,26 @@ where // 以下是 S 必须满足的 trait 上界
         self // 返回自身以支持链式调用
     }
 
+    /// 注册服务端 TLS 的证书来源（feature = "tls"）。
+    ///
+    /// 证书的保存 / 来源 / 轮换全在业务层：业务实现 [`crate::tls::CertProvider`]，
+    /// 在 `serve()` 前注册。当 `[server.tls].enabled = true` 时必须注册，否则启动 fail-fast。
+    ///
+    /// ```rust,ignore
+    /// App::<AppState>::bootstrap().await?
+    ///     .cert_provider(Arc::new(MyCertProvider { /* 业务数据源 */ }))
+    ///     .serve().await?;
+    /// ```
+    #[cfg(feature = "tls")] // 仅在开启 tls feature 时编译下面方法
+    pub fn cert_provider(mut self, provider: Arc<dyn crate::tls::CertProvider>) -> Self { // 注册证书来源
+        self.cert_provider = Some(provider); // 保存到字段
+        self // 返回自身以支持链式调用
+    }
+
     /// 执行完整装配并阻塞运行，直到收到退出信号（Ctrl+C / SIGTERM）。
     /// 停机顺序：停止接新请求（排空在途）→ 队列 worker 退出 → 调度器停止。
-    pub async fn serve(self) -> AppResult<()> { // 装配全部组件并阻塞运行直到停机
+    #[cfg_attr(not(feature = "tls"), allow(unused_mut))] // 未开 tls 时 self 无需可变
+    pub async fn serve(mut self) -> AppResult<()> { // 装配全部组件并阻塞运行直到停机
         #[cfg(feature = "scheduler")] // 仅在开启 scheduler 时提前取出 jobs
         let jobs = self.jobs; // 取出定时任务集合（后续 start_from_config 消费）
 
@@ -219,6 +240,45 @@ where // 以下是 S 必须满足的 trait 上界
         //    自行套层（见 App::mount 文档）。
         let settings = self.core.config.load().clone(); // 取当前配置快照（后续多次读取）
         let server = &settings.server; // 引用其中的 server 配置段
+
+        // TLS 装配（feature = "tls"）：仅在 [server.tls].enabled 时启用。
+        // 证书由业务 CertProvider 提供；框架不持有证书、不定义存储约定、不内置来源。
+        #[cfg(feature = "tls")] // 仅在开启 tls feature 时编译
+        let tls_state: Option<Arc<crate::tls::TlsState>> = if settings.server.tls.enabled { // 配置启用了 TLS
+            let tls = &settings.server.tls; // 引用 TLS 配置段
+            let provider = self.cert_provider.clone().ok_or_else(|| { // 取业务注册的证书来源
+                crate::error::AppError::internal( // 未注册则 fail-fast
+                    "[server.tls].enabled = true 但未注册证书来源（App::cert_provider）", // 明确提示
+                )
+            })?;
+            let state = Arc::new(crate::tls::TlsState::new(provider)); // 构造 TLS 状态
+            state // 首次装载：失败 fail-fast（没有证书无法对外服务）
+                .reload()
+                .await
+                .map_err(|e| crate::error::AppError::internal(format!("tls initial load failed: {e}")))?;
+            self.core.tls = Some(state.clone()); // 注入 CoreState（供业务 core.tls.reload()）
+            if tls.monitor_expiry { // 到期监控（TLS 开启即生效，与目录模式无关）
+                self.core.register_health_check(Arc::new( // 注册到期探针到 /ready
+                    crate::tls::reload::ExpiryProbe::new(state.clone()),
+                ));
+            }
+            // 重新派生应用状态：让 handler 通过 core.tls 与探针看到最新装配
+            self.state = S::from_core(self.core.clone()); // 用更新后的核心状态重建
+            if tls.refresh_interval_secs > 0 { // 轮询刷新（默认 60s，0 = 关）
+                crate::tls::reload::spawn_poller(state.clone(), tls.refresh_interval_secs); // 启动轮询任务
+            }
+            if !tls.dir.trim().is_empty() { // 目录模式：配了 dir 才启用目录监听
+                crate::tls::reload::spawn_dir_watcher(&tls.dir, state.clone(), tls.debounce_ms); // 启动目录监听
+            }
+            tracing::info!( // 记录 TLS 已启用
+                min_version = %tls.min_version, // 最低协议版本
+                dir_mode = !tls.dir.trim().is_empty(), // 是否目录模式
+                "core-rs TLS enabled" // 提示
+            );
+            Some(state) // 返回 TLS 状态
+        } else { // 未启用 TLS
+            None // 无 TLS 状态（走纯 HTTP 路径）
+        };
 
         let mut router: Router<S> = crate::observability::health::routes::<S>(); // 以框架自带的 health/ready 路由为基座
         for r in self.routers { // 遍历应用路由树
@@ -305,6 +365,70 @@ where // 以下是 S 必须满足的 trait 上界
         // 5. 监听与优雅停机
         let addr = format!("{}:{}", server.host, server.port); // 拼出监听地址 host:port
         let server_cfg_shutdown_timeout = server.shutdown_timeout_secs; // 取出停机等待超时秒数
+
+        // ---- TLS 路径（feature = "tls" 且 [server.tls].enabled）----
+        #[cfg(feature = "tls")] // 仅在开启 tls feature 时编译
+        if let Some(tls_state) = tls_state { // 已装配 TLS 状态
+            let tls = &settings.server.tls; // 引用 TLS 配置段
+            let socket_addr: std::net::SocketAddr = addr // 解析监听地址
+                .parse()
+                .map_err(|e| crate::error::AppError::internal(format!("invalid listen addr `{addr}`: {e}")))?;
+            let rustls_config = crate::tls::serve::build_rustls_config(&tls.min_version, tls_state.store()) // 构建 rustls 配置
+                .map_err(|e| crate::error::AppError::internal(format!("tls config build failed: {e}")))?;
+            tracing::info!("core-rs application listening on https://{addr}"); // 记录已开始监听（HTTPS）
+
+            // 停机信号 → watch 广播（TLS 主服务与可选跳转服务共用同一信号）
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false); // 创建广播通道
+            tokio::spawn(async move { // 后台等待停机信号
+                shutdown_signal().await; // 等待 Ctrl-C / SIGTERM
+                let _ = shutdown_tx.send(true); // 广播停机
+            });
+
+            // 可选：HTTP → HTTPS 308 跳转
+            if tls.redirect_http { // 配置启用了跳转
+                crate::tls::serve::spawn_http_redirect( // 启动跳转监听
+                    server.host.clone(), // 监听地址
+                    tls.http_port, // 明文端口
+                    server.port, // 目标 HTTPS 端口
+                    shutdown_rx.clone(), // 共用停机信号
+                );
+            }
+
+            // 优雅停机：watch 触发 → axum-server Handle
+            let handle: axum_server::Handle<std::net::SocketAddr> = axum_server::Handle::new(); // 创建停机句柄
+            { // 后台把 watch 信号转成 Handle 优雅停机
+                let handle = handle.clone(); // 克隆句柄
+                let mut rx = shutdown_rx; // 取接收端（此后独占）
+                let timeout = server_cfg_shutdown_timeout; // 停机等待秒数
+                tokio::spawn(async move { // 后台任务
+                    let _ = rx.changed().await; // 等待停机广播
+                    handle.graceful_shutdown(if timeout > 0 { // 触发优雅停机
+                        Some(std::time::Duration::from_secs(timeout)) // 限时等待在途请求
+                    } else {
+                        None // 不限时（一直等在途请求）
+                    });
+                });
+            }
+
+            let result = axum_server::tls_rustls::bind_rustls(socket_addr, rustls_config) // 绑定并启动 TLS 服务
+                .handle(handle) // 挂接停机句柄
+                .serve(app) // 提供服务（含连接信息）
+                .await; // 阻塞运行直到停机
+
+            // 后台件收尾（与 HTTP 路径一致）
+            if let Some(worker) = worker_runner { // 若有队列 worker
+                worker.shutdown().await; // 排空退出
+            }
+            #[cfg(feature = "scheduler")] // 仅在开启 scheduler 时收尾调度器
+            if let Some(mut scheduler) = scheduler { // 若有调度器
+                let _ = scheduler.shutdown().await; // 停止调度器
+            }
+
+            result.map_err(|e| crate::error::AppError::internal(format!("tls server error: {e}")))?; // 传播服务错误
+            tracing::info!("core-rs application stopped"); // 记录应用已停止
+            return Ok(()); // TLS 路径结束
+        }
+
         let listener = tokio::net::TcpListener::bind(addr.as_str()).await?; // 绑定并监听 TCP 端口
         tracing::info!("core-rs application listening on http://{addr}"); // 记录已开始监听
 

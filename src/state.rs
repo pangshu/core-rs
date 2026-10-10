@@ -53,6 +53,10 @@ pub struct CoreState { // 框架核心状态结构体
     /// 实时通信 hub（feature = "ws" / "sse"）
     #[cfg(any(feature = "ws", feature = "sse"))] // 开启 ws 或 sse 任一 feature 时编译下面字段
     pub hub: Arc<crate::realtime::hub::Hub>, // 实时通信中心
+    /// 服务端 TLS 状态（feature = "tls" 且 `[server.tls].enabled`）：
+    /// 证书仓库 + 业务来源；业务可调 `tls.reload()` 手动触发证书热更新
+    #[cfg(feature = "tls")] // 仅在开启 tls feature 时编译下面字段
+    pub tls: Option<Arc<crate::tls::TlsState>>, // 可选的 TLS 状态
     /// 应用自定义健康探针（/ready 聚合；内置 db/cache/queue 探测无需注册）
     pub health_checks: std::sync::RwLock<Vec<Arc<dyn crate::observability::health::HealthCheck>>>, // 读写锁保护的自定义健康探针列表
     /// 日志后端保活（otel exporter / rotate-rs writer；Drop 时 flush）
@@ -79,6 +83,8 @@ impl Clone for CoreState { // 手动实现 Clone（部分字段需特殊处理�
             authz: self.authz.clone(), // 克隆授权强制器 Arc
             #[cfg(any(feature = "ws", feature = "sse"))] // 开启 ws 或 sse 时克隆
             hub: self.hub.clone(), // 克隆实时通信 Hub
+            #[cfg(feature = "tls")] // 仅在开启 tls 时克隆
+            tls: self.tls.clone(), // 克隆 TLS 状态 Arc
             health_checks: std::sync::RwLock::new( // 探针列表需深拷贝一份新的读写锁
                 self.health_checks // 读取原列表
                     .read() // 获取读锁
@@ -92,12 +98,14 @@ impl Clone for CoreState { // 手动实现 Clone（部分字段需特殊处理�
 
 impl std::fmt::Debug for CoreState { // 手动实现 Debug（避免打印不可 Debug 的字段）
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { // 实现格式化输出
-        f.debug_struct("CoreState") // 以结构体形式开始
-            .field("environment", &self.environment) // 输出环境
+        let mut d = f.debug_struct("CoreState"); // 以结构体形式开始
+        d.field("environment", &self.environment) // 输出环境
             .field("db", &self.db.is_some()) // 仅输出是否已配置数据库
             .field("queue", &self.queue.name()) // 输出队列后端名
-            .field("auth", &self.auth.as_ref().map(|a| a.name())) // 输出认证方式名（可选）
-            .finish_non_exhaustive() // 其余字段省略，标记为非穷尽
+            .field("auth", &self.auth.as_ref().map(|a| a.name())); // 输出认证方式名（可选）
+        #[cfg(feature = "tls")] // 仅在开启 tls 时输出该字段
+        d.field("tls", &self.tls.is_some()); // 仅输出是否已启用 TLS
+        d.finish_non_exhaustive() // 其余字段省略，标记为非穷尽
     }
 }
 
@@ -281,6 +289,8 @@ impl CoreState { // 核心状态的装配与注册方法
             authz, // 授权强制器
             #[cfg(any(feature = "ws", feature = "sse"))] // 开启 ws 或 sse 时填字段
             hub, // 实时通信 Hub
+            #[cfg(feature = "tls")] // 仅在开启 tls 时填字段
+            tls: None, // TLS 状态由 App::serve 装配时注入
             health_checks: std::sync::RwLock::new(Vec::new()), // 探针列表初始为空
             _log_guard: Some(log_guard), // 持有日志保活句柄
         })

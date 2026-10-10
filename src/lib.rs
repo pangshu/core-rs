@@ -35,6 +35,8 @@ pub mod resilience; // 弹性模块（超时/重试/熔断等）
 pub mod security; // 安全模块（密码哈希等）
 pub mod state; // 核心状态模块（CoreState）
 pub mod task; // 定时任务模块（scheduler）
+#[cfg(feature = "tls")] // 仅在开启 tls feature 时编译服务端 TLS 模块
+pub mod tls; // 服务端 TLS 模块（HTTPS / 多域名证书 / 热更新）
 pub mod traits; // 解耦点 trait 模块（HasDb/HasCache/…）
 pub mod utils; // 工具模块（雪花 ID、时间等）
 pub mod web; // web 层模块（响应封装、提取器、路由装配）

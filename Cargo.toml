@@ -42,6 +42,9 @@ casbin = ["dep:casbin"]
 ws = ["axum/ws"]
 sse = []
 
+# ---- 服务端 TLS（HTTPS / 多域名证书 / 热更新）----
+tls = ["dep:axum-server", "dep:rustls", "dep:rustls-pemfile", "dep:x509-parser", "dep:notify"]
+
 # ---- 运维件 ----
 scheduler = ["dep:tokio-cron-scheduler"]
 metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
@@ -154,6 +157,20 @@ reqwest = { version = "0.13", optional = true, default-features = false, feature
     "webpki-roots",
 ] }
 
+# 服务端 TLS（feature = "tls"）：axum-server + rustls（crypto provider = ring）
+# tls-rustls-no-provider：不强制 aws-lc-rs，provider 由框架显式选择（避免与 sqlx/reqwest 冲突）
+axum-server = { version = "0.8", optional = true, default-features = false, features = [
+    "tls-rustls-no-provider",
+] }
+rustls = { version = "0.23", optional = true, default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-pemfile = { version = "2", optional = true }
+# 证书到期监控：从证书 DER 中取 notAfter
+x509-parser = { version = "0.18", optional = true }
+
 # security/crypto（文档 三·16）
 aes-gcm = "0.10"
 hmac = "0.12"
@@ -167,3 +184,7 @@ rotate-rs = { git = "https://github.com/pangshu/rotate-rs", optional = true }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 async-trait = "0.1"
+# TLS 测试：现场生成自签证书 + 以 rustls 客户端做真实握手（SNI 选择 / 热更新）
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
