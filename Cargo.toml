@@ -59,7 +59,9 @@ testing = ["tower/util"]
 
 [dependencies]
 # web
-axum = { version = "0.8", features = ["macros"] }
+# multipart 常开：下游（如 PilotCms）经 core_rs::axum::extract::Multipart 做文件上传，
+# feature 只能由直接依赖方开启，故由框架常驻代开
+axum = { version = "0.8", features = ["macros", "multipart"] }
 tokio = { version = "1", features = [
     "macros",
     "rt-multi-thread",
@@ -82,11 +84,14 @@ tower-http = { version = "0.6", features = [
 futures = "0.3"
 
 # orm
+# with-rust_decimal 常开：下游经 core_rs::sea_orm 使用 DECIMAL 列（金额）解码，
+# feature 只能由直接依赖方开启，故由框架常驻代开
 sea-orm = { version = "2", default-features = false, features = [
     "runtime-tokio-rustls",
     "macros",
     "with-chrono",
     "with-json",
+    "with-rust_decimal",
 ] }
 
 # config
