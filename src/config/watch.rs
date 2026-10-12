@@ -33,12 +33,14 @@ impl<T: DeserializeOwned + Serialize + Clone + Send + Sync + 'static> Watcher<T>
         }
     }
 
-    /// 被监听的文件（default.toml + {env}.toml，存在的才监听）
+    /// 被监听的文件（`default.{ext}` + `{env}.{ext}`，按格式探测后取实际存在的）
     fn watched_files(&self) -> Vec<std::path::PathBuf> { // 计算需要监听的配置文件路径
-        ["default", self.options.environment.file_stem()] // 默认配置与环境配置的文件名干
-            .iter() // 迭代文件名干
-            .map(|stem| std::path::Path::new(&self.options.dir).join(format!("{stem}.toml"))) // 拼成 {dir}/{stem}.toml 路径
-            .filter(|p| p.is_file()) // 只保留实际存在的文件
+        ["default", self.options.environment.file_stem()] // 默认配置与环境配置的逻辑名
+            .iter() // 迭代逻辑配置名
+            .filter_map(|stem| { // 逐个解析为实际文件
+                super::source::resolve_file(&self.options.dir, stem, self.options.format) // 按格式探测实际文件
+                    .map(|(path, _)| path) // 只取路径，格式此处不需要
+            })
             .collect() // 收集为路径列表
     }
 

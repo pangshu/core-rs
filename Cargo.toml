@@ -90,7 +90,11 @@ sea-orm = { version = "2", default-features = false, features = [
 ] }
 
 # config
-config = { version = "0.15", features = ["toml"] }
+# 三种配置文件格式（toml / yaml / json）同时启用：
+# - toml：默认格式，向后兼容既有 config/*.toml
+# - yaml：config 的 yaml feature 同时覆盖 .yaml / .yml
+# - json：便于工具链生成或配置中心下发
+config = { version = "0.15", features = ["toml", "yaml", "json"] }
 arc-swap = "1"
 notify = { version = "8", optional = true }
 
