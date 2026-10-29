@@ -1,0 +1,21 @@
+# 示例配置 —— development（AURORA_ENV=development）
+#
+# 本目录只有两份文件，对应两个环境：development.toml / production.toml。
+# 框架只认 4 个环境名（development / test / staging / production），
+# 且**只读与 AURORA_ENV 同名的那一份**，没有 default.* 叠加层。
+
+[app]
+name = "config-demo (development)"
+
+[server]
+host = "127.0.0.1"
+port = 8091
+request_timeout = "10s"
+graceful_shutdown_timeout = "5s"
+# `trust_proxy = true` 时必填：只有来自这些网段的直连对端，其 X-Forwarded-For 才被采信。
+# 示例会用 AURORA_SERVER__TRUST_PROXY=true 覆盖 trust_proxy（环境变量优先级最高）。
+trusted_proxies = ["10.0.0.0/8", "127.0.0.1/32"]
+
+[telemetry]
+level = "debug"
+format = "pretty"

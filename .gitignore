@@ -25,7 +25,6 @@ rustc-ice-*.txt
 
 /docs
 /target
-/examples
 /tests
 Cargo.lock
 .zcodeignore
