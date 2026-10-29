@@ -1,0 +1,438 @@
+[package]
+name = "aurora"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "以 Web 为主要方向的 Rust 应用基座（Application Base）"
+license = "Apache-2.0"
+authors = ["pangshu"]
+readme = "README.md"
+keywords = ["web", "framework", "axum", "tokio", "application-base"]
+categories = ["web-programming::http-server"]
+# 团队内部使用，**不发布到 crates.io**（docs/01 §6）。
+# 因此没有配 release-plz / 发布流程；1.0 指的是「API 冻结」，不是「对外发版」。
+publish = false
+
+# ---------------------------------------------------------------------------
+# 常开核心依赖
+# ---------------------------------------------------------------------------
+[dependencies]
+axum = "0.8"
+futures-util = { version = "0.3", optional = true }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "signal",
+    "time",
+    "sync",
+    "io-util",
+] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = [
+    "trace",
+    "cors",
+    "compression-gzip",
+    "timeout",
+    "request-id",
+    "catch-panic",
+    "limit",
+    "util",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+config = { version = "0.15", features = ["toml", "yaml", "json"] }
+# OCSP Stapling（feature `ocsp-stapling`）：构造 OCSP 请求 / 解析并校验响应
+# `builder` 提供 `Request::from_cert` / `CertId::from_issuer`（需要 digest + signature）
+x509-ocsp = { version = "0.2", optional = true, features = ["builder", "std"] }
+# `Certificate::from_der`（取 AIA 里的 responder 地址、验签用的 SPKI）
+x509-cert = { version = "0.2", optional = true, features = ["std"] }
+# SHA-1 是 OCSP 的通用 CertID 算法（RFC 6960 §4.1.1 的 MUST），`oid` 用于 `AssociatedOid`
+sha1 = { version = "0.10", optional = true, features = ["oid"] }
+# `Encode::to_der` / `Decode::from_der`
+der = { version = "0.7", optional = true, features = ["std"] }
+const-oid = { version = "0.9", optional = true }
+
+# 配置中心（feature `nacos`）：只用文本 GET，不需要 json 特性
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "json"] }
+thiserror = "2"
+anyhow = "1"
+http = "1"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+humantime = "2"
+byte-unit = "5"
+dotenvy = "0.15"
+# TODO(docs/04 §2.2): `async-trait` 在文档中列为「可选能力依赖」，但
+# `telemetry/health.rs`（常开）与 `db` / `auth` 均使用异步 trait，故此处常开。
+# 待 docs/04 §2.2 将其归入常开依赖后移除本 TODO。
+async-trait = "0.1"
+
+# ---------------------------------------------------------------------------
+# 可选依赖（feature 门控；用 `dep:` 语法引用，未启用时不引入）
+# ---------------------------------------------------------------------------
+# 认证 / 会话
+jsonwebtoken = { version = "11", optional = true, default-features = false, features = ["rust_crypto", "use_pem"] }
+casbin = { version = "2", optional = true }
+axum-extra = { version = "0.10", optional = true, features = ["cookie"] }
+# 数据库（驱动互斥）
+sea-orm = { version = "2", optional = true }
+sea-orm-migration = { version = "2", optional = true, default-features = false }
+# 缓存 / 队列
+moka = { version = "0.12", optional = true, features = ["sync"] }
+# TODO(docs/04 §2.2): 文档只写 `tokio-comp`，但 `ConnectionManager`（自动重连）
+# 还需 `connection-manager` feature；缺它只能用不重连的 `MultiplexedConnection`。
+# `tokio-rustls-comp`：`rediss://`（TLS）必需——docs/11 要求 Redis 走 TLS + 凭据。
+redis = { version = "0.32", optional = true, features = [
+    "tokio-comp",
+    "connection-manager",
+    "tokio-rustls-comp",
+] }
+lapin = { version = "2", optional = true }
+# `cmake-build`：用 CMake 构建内置 librdkafka（Windows 下默认的 `./configure` 走不通）
+rdkafka = { version = "0.36", optional = true, features = ["cmake-build"] }
+# 限流 / 任务
+governor = { version = "0.8", optional = true }
+tokio-cron-scheduler = { version = "0.13", optional = true }
+# 安全 / 校验
+argon2 = { version = "0.5", optional = true }
+validator = { version = "0.20", optional = true, features = ["derive"] }
+aes-gcm = { version = "0.10", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+hmac = { version = "0.12", optional = true }
+# 把「任意长度的密钥材料」派生成 32 字节对称密钥（`Cipher::from_key_material`）：
+# 直接截断 / 补零会让 64 位 hex 密钥退化成 128 bit 熵，是 fail-open。
+hkdf = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true, features = ["oid"] }
+rsa = { version = "0.9", optional = true }
+base64 = { version = "0.22", optional = true }
+# 常量时间比较。**非可选**：`utils::constant_time_eq` 被常开/独立 feature 的
+# 组件共用（CSRF 双提交 Cookie、metrics 抓取令牌、限流主体键），
+# 各自手写比较循环不是可证明的常量时间（见 docs/04 §2.2）。
+subtle = "2"
+# 密钥内存清零。**非可选**：`AppConfig::zeroize_secrets` 在配置热更新替换快照时
+# 擦除旧值，与是否启用 `security` feature 无关。
+zeroize = { version = "1" }
+# OpenAPI / 检索 / GeoIP
+# 注：`utoipa` 按 docs/04 §2.2 取 5。
+# TODO(docs/03 §6 / docs/06 M4): `utoipa-swagger-ui`（0.x/5.x/9.x/10.x 全部版本）均依赖
+# 已被 crates.io 全量 yank 的 `zip`（0.6 / 2.x / 3.0.0 / 8.6.0），当前无法解析；
+# 故 `openapi` feature 暂只含 `utoipa`，Swagger UI 由 `openapi/ui.rs` 以静态页面挂载，
+# 待上游发布依赖 `zip >= 9` 的版本后切回 `utoipa-swagger-ui`。
+utoipa = { version = "5", optional = true }
+tantivy = { version = "0.24", optional = true }
+jieba-rs = { version = "0.7", optional = true }
+maxminddb = { version = "0.24", optional = true }
+# `serde`：`[http].ip_filter.cidrs` / `[server].trusted_proxies` 直接反序列化为 `IpNet`
+# （非法网段在配置加载期即报错）。**非可选**：`trusted_proxies` 属于常开的 `[server]` 段。
+ipnet = { version = "2", features = ["serde"] }
+# i18n / TLS / 热更新 / 日志 / 测试
+fluent = { version = "0.16", optional = true }
+unic-langid = { version = "0.9", optional = true }
+# `tls-rustls`：HTTPS / SNI 入口（`tls_rustls::RustlsConfig` + `bind_rustls`）
+axum-server = { version = "0.8", optional = true, features = ["tls-rustls"] }
+# 自建 accept loop（feature `serve-hardened`）：装上 hyper 的 Timer，
+# 让请求头读超时真正生效。现在这两个只是 axum 的传递依赖，直连才需要显式声明。
+hyper = { version = "1", optional = true, features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1", optional = true, features = ["server-auto", "tokio"] }
+rustls = { version = "0.23", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+x509-parser = { version = "0.18", optional = true }
+notify = { version = "8", optional = true }
+# TODO(docs/03 §6): 文档把 `arc-swap` 列为 `watch` 的可选依赖；但 `ConfigHandle`
+# 需要 ArcSwap 才能热替换，故改为常开（`watch` 只门控 `notify`）。
+arc-swap = "1"
+# 日志文件轮转（feature `log-file`）：时间 / 大小 / 混合切割 + gz 压缩 + 非阻塞写入。
+# 尚未发布到 crates.io，走 git 源并用 `rev` 锁定：git 依赖没有版本约束，
+# 只靠 Cargo.lock 会让 clean 构建/`cargo update` 悄悄换实现。升级时手动改 sha。
+rotate-rs = { git = "https://github.com/pangshu/rotate-rs", rev = "6f9b2ef460317e87174d34a69c31625bfbce62cc", optional = true }
+prometheus = { version = "0.14", optional = true, default-features = false }
+# 追踪导出（feature `otel`）：OTLP/gRPC。版本需成套对齐：
+# tracing-opentelemetry 0.32 → opentelemetry 0.31
+opentelemetry = { version = "0.31", optional = true, default-features = false, features = ["trace", "logs"] }
+opentelemetry_sdk = { version = "0.31", optional = true, default-features = false, features = ["trace", "logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", optional = true, default-features = false, features = ["grpc-tonic", "trace", "logs"] }
+tracing-opentelemetry = { version = "0.32", optional = true, default-features = false }
+# 把 tracing 事件桥接成 OTel 日志记录（`[telemetry].otel.logs = true`）
+opentelemetry-appender-tracing = { version = "0.31", optional = true, default-features = false }
+# `ws`：WebSocket 端到端测试（mock 传输层不支持升级，需 `http_transport`）
+axum-test = { version = "17", optional = true, features = ["ws"] }
+
+# ---------------------------------------------------------------------------
+# Feature 矩阵（契约见 docs/03 §6）
+#
+# `default` = 核心 + `auth`（docs/05 §13）；`auth` 不引入 `db`，用户存储由业务侧实现。
+# 注意：`jsonwebtoken` 需显式选择加密后端（此处 `rust_crypto`）。
+# ---------------------------------------------------------------------------
+[features]
+default = ["auth"]
+
+# —— 认证 / 授权 ——
+# `auth` 只含 JWT（jsonwebtoken）；`authz` 才拉起 RBAC 策略引擎（casbin）。
+# 拆开的理由：`casbin` 会拖进 `rhai`（脚本引擎）+ `petgraph` + `regex`，
+# 只用 JWT 登录的应用每轮编译都要付这笔钱（实测默认组合 258 → 拆后显著下降）。
+# `authz` 蕴含 `auth`：没有 JWT 就没有「已验签主体」，RBAC 无从判定。
+auth = ["dep:jsonwebtoken"]
+authz = ["auth", "dep:casbin"]
+session = ["auth", "dep:axum-extra"]
+session-redis = ["session", "cache-redis"]
+# jti 黑名单（登出 / 吊销）：复用 cache 存储
+revocation = ["auth", "cache"]
+
+# —— 数据库（驱动互斥，只应启用其一）——
+# `runtime-tokio-rustls`：SeaORM 2 的 `sqlx-*` 驱动 feature 不含异步运行时，必须显式追加；
+# `base64`：游标分页的不透明编码（docs/10 §6）；
+# `stream` + `futures-util`：全量导出的流式读取（`db::stream_all`）。
+db = [
+    "dep:sea-orm",
+    "dep:sea-orm-migration",
+    "dep:base64",
+    "dep:futures-util",
+    "sea-orm/runtime-tokio-rustls",
+    "sea-orm-migration/runtime-tokio-rustls",
+    "sea-orm/stream",
+]
+db-postgres = ["db", "sea-orm/sqlx-postgres", "sea-orm-migration/sqlx-postgres"]
+db-sqlite = ["db", "sea-orm/sqlx-sqlite", "sea-orm-migration/sqlx-sqlite"]
+db-mysql = ["db", "sea-orm/sqlx-mysql", "sea-orm-migration/sqlx-mysql"]
+
+# —— 缓存 / 队列 ——
+cache = ["cache-inmem"]
+cache-inmem = ["dep:moka"]
+cache-redis = ["cache", "dep:redis"]
+queue = ["queue-memory"]
+queue-memory = []
+queue-redis = ["queue", "dep:redis"]
+queue-amqp = ["queue", "dep:lapin"]
+queue-kafka = ["queue", "dep:rdkafka"]
+
+# —— 其他能力 ——
+# TODO(docs/03 §6): 文档写 `ratelimit = ["dep:tower-governor", "dep:governor"]`，
+# 但 `tower_governor::GovernorLayer` 只能产出它自己的错误体，无法满足统一响应体
+# （`40001`）+ `per_key` 维度 + 运行期开关，故实现直接用 `governor` 核心 +
+# `from_fn` 中间件，`tower-governor` 暂不引入。
+#
+# `hmac` + `sha2`：`per_key` 的主体键用 `HMAC-SHA256(salt, sub)`（`DefaultHasher`
+# 是固定种子的非密码学哈希，可反查、可构造碰撞）。
+ratelimit = ["dep:governor", "dep:hmac", "dep:sha2"]
+# 复用 `[cache].redis.url` 作为连接串，故蕴含 cache
+ratelimit-redis = ["ratelimit", "cache", "dep:redis"]
+task = ["cache", "dep:tokio-cron-scheduler"]
+security = [
+    "dep:argon2",
+    "dep:validator",
+    "dep:aes-gcm",
+    "dep:chacha20poly1305",
+    "dep:hmac",
+    "dep:hkdf",
+    "dep:sha2",
+    "dep:rsa",
+    "dep:base64",
+]
+openapi = ["dep:utoipa"]
+search = ["dep:tantivy", "dep:jieba-rs"]
+geoip = ["dep:maxminddb"]
+resilience = []
+# TODO(docs/03 §6): 文档的 ws/sse 只列 `axum`；但拆分 WebSocket（split）与
+# 从 `broadcast` 构造 SSE 流都需要 `futures-util`，故在此追加。
+ws = ["axum/ws", "dep:futures-util"]
+sse = ["dep:futures-util"]
+i18n = ["dep:fluent", "dep:unic-langid"]
+tls = [
+    "dep:axum-server",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:x509-parser",
+    "dep:notify",
+]
+
+# 自建 accept loop：给 hyper 装上 Timer，使 `[server].header_read_timeout` 真正生效。
+# 只在「直接暴露公网且没有前置反代」时需要——有 nginx/envoy 就用代理的
+# `client_header_timeout`，别开这个（多一层自己维护的连接生命周期）。
+serve-hardened = ["dep:hyper", "dep:hyper-util"]
+
+# —— 中间件 ——
+csrf = ["dep:hmac", "dep:sha2"]
+idempotency = ["cache", "dep:sha2"]
+ip-filter = []
+security-headers = ["tower-http/set-header"]
+access-log = []
+
+# —— 配置 / 日志 / 工具 / 测试 ——
+watch = ["dep:notify"]
+# 轮转库换掉 `tracing-appender`：后者不支持 gz 压缩、保留策略弱，且时间轮转
+# 依赖写入触发（空闲进程不切割）。见 docs/19 的决策记录。
+log-file = ["dep:rotate-rs"]
+# 配置中心（Nacos）：docs/06 M6 交付物，docs/03 §6 未定义 feature 名，此处取 `nacos`
+nacos = ["dep:reqwest"]
+# OCSP Stapling：复用 reqwest 作为 OCSP responder 的 HTTP 客户端
+ocsp-stapling = [
+    "tls",
+    "dep:reqwest",
+    "dep:x509-ocsp",
+    "dep:x509-cert",
+    "dep:sha1",
+    "dep:der",
+    "dep:const-oid",
+    "dep:base64",
+]
+
+# TODO(docs/03 §6): 文档未定义 `metrics` feature（`[telemetry]` 为常开段）；
+# 为不把 prometheus 塞进所有构建，此处用 feature 门控，`full` 已包含。
+# `sha2`：抓取令牌比较前先取摘要，避免 `constant_time_eq` 的「等长才恒定时间」
+# 把令牌长度泄漏出去（见 `telemetry::metrics::token_matches`）。
+metrics = ["dep:prometheus", "dep:sha2"]
+# TODO(docs/03 §6): 同上，`otel` 亦未在文档 feature 清单中定义。
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry-appender-tracing",
+]
+snowflake = []
+testing = ["dep:axum-test", "tower/util"]
+
+# —— 推荐的生产组合 ——
+#
+# 不包含「编译代价大且多数应用用不到」的三项：
+# - `search`：tantivy + zstd-sys（**需要 C 工具链**）
+# - `geoip`：maxminddb + MMDB 数据文件
+# - `task`：tokio-cron-scheduler
+# 也不含任何 `db` 驱动 / Redis 后端（互斥或需外部服务，一律显式追加）。
+#
+# 用 `full` 的代价：实测 606 个 crate（standard 明显更少），且没有 C 工具链时
+# `--features full` 直接编不过。**默认建议用 `standard` + 需要的那几项。**
+standard = [
+    "db",
+    "auth",
+    "authz",
+    "session",
+    # `revocation` 不引入新依赖（= auth + cache），但带来 jti 黑名单与
+    # refresh 轮换/重用检测。运行期仍由 `[auth].revocation.enabled` 控制（默认关）。
+    "revocation",
+    "cache",
+    "queue",
+    "ratelimit",
+    "security",
+    "openapi",
+    "resilience",
+    "ws",
+    "sse",
+    "i18n",
+    "tls",
+    "csrf",
+    "idempotency",
+    "ip-filter",
+    "security-headers",
+    "access-log",
+    "watch",
+    "log-file",
+    "snowflake",
+    "metrics",
+    "otel",
+]
+
+# —— 便捷全量 = `standard` + 重依赖三项 + 测试/OCSP ——
+# 定义上复用 `standard`，避免两处清单漂移。
+full = [
+    "standard",
+    "task",
+    "search",
+    "geoip",
+    "testing",
+    "ocsp-stapling",
+]
+
+[dev-dependencies]
+# 仅 `tls_https` 示例使用：本地生成自签证书（**禁止用于生产**，见 docs/16 §7）
+rcgen = "0.13"
+# OCSP 测试：用 P-256 私钥给假响应签名（与 rcgen 生成的 CA 同一条密钥）
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+# OCSP 测试：真实 TLS 握手，验证装订响应确实送到客户端
+tokio-rustls = "0.26"
+# 缓存降级测试：实现一个「总是失败」的 `Cache` 后端注入 `CacheService::new`
+async-trait = "0.1"
+
+# ---------------------------------------------------------------------------
+# Profile（docs/18 §4）
+# ---------------------------------------------------------------------------
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "unwind" # 保留 unwind 以启用 CatchPanicLayer
+strip = true
+
+# ---------------------------------------------------------------------------
+# 示例：需要额外 feature 的示例仅在该 feature 下构建
+#
+# TODO(docs/13 §1): 示例清单中仍未交付的条目（`full_app` / `config_multi_env` /
+#   `auth_session` / `resilience_upstream` / `tls_https`）随 M6 落地；
+#   `full_app` 需 `--features full,db-sqlite`，而 `full` 引用的 M4+ 可选依赖
+#   在当前阶段无法在全部平台构建（如 `rdkafka` 需 C 工具链）。
+# TODO(docs/13 §1 与 docs/06 M3 不一致): 清单将 JWT 示例命名为 `auth_jwt`，
+#   而路线图 M3 写作 `auth_guard`；此处从路线图，待文档统一后改名。
+# ---------------------------------------------------------------------------
+[[example]]
+name = "crud_repository"
+required-features = ["db", "db-sqlite"]
+
+[[example]]
+name = "auth_guard"
+required-features = ["auth", "authz", "security"]
+
+[[example]]
+name = "openapi_docs"
+required-features = ["openapi"]
+
+[[example]]
+name = "cache_and_lock"
+required-features = ["cache"]
+
+[[example]]
+name = "queue_worker"
+required-features = ["cache", "queue"]
+
+[[example]]
+name = "i18n_api"
+required-features = ["i18n"]
+
+[[example]]
+name = "geoip_lookup"
+required-features = ["geoip"]
+
+[[example]]
+name = "realtime_chat"
+required-features = ["ws", "sse"]
+
+[[example]]
+name = "search_articles"
+required-features = ["search"]
+
+[[example]]
+name = "middleware_stack"
+required-features = ["security-headers", "ip-filter", "idempotency"]
+
+[[example]]
+name = "full_app"
+path = "examples/full_app/main.rs"
+required-features = ["full", "db-sqlite"]
+
+[[example]]
+name = "tls_https"
+required-features = ["tls"]
+
+[[example]]
+name = "config_multi_env"
+required-features = ["watch"]
+
+[[example]]
+name = "resilience_upstream"
+required-features = ["resilience"]
+
+[[example]]
+name = "auth_session"
+required-features = ["session", "csrf"]
