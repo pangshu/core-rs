@@ -1,2 +1,2 @@
-# core-rs
+# Aurora
 rust web framework
