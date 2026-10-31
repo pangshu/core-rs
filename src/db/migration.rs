@@ -43,6 +43,9 @@ pub async fn status<M: MigratorTrait>(db: &DbPool) -> AppResult<()> {
 
 /// 按配置决定是否在启动时执行迁移（启动状态机第 4 步）。
 ///
+/// 启用表前缀时额外检查迁移记录表是否带前缀：多个应用共用一个数据库而共用
+/// `seaql_migrations` 时，后启动的应用会认为对方的迁移「已应用」而跳过建表。
+///
 /// # Errors
 /// 迁移失败返回 [`StartupError::Migration`]。
 pub async fn migrate_on_start<M: MigratorTrait>(
@@ -52,8 +55,29 @@ pub async fn migrate_on_start<M: MigratorTrait>(
     if !enabled {
         return Ok(());
     }
+    warn_if_migration_table_unprefixed::<M>();
     tracing::info!("running database migrations");
     up::<M>(db)
         .await
         .map_err(|e| StartupError::Migration(e.to_string()))
+}
+
+/// 迁移记录表与本进程表前缀不一致时告警（见 [`migrate_on_start`]）。
+fn warn_if_migration_table_unprefixed<M: MigratorTrait>() {
+    let Some(prefix) = crate::db::prefix::current() else {
+        return;
+    };
+    if prefix.is_empty() {
+        return;
+    }
+    let table = M::migration_table_name().to_string();
+    if !table.starts_with(prefix) {
+        tracing::warn!(
+            migration_table = table,
+            table_prefix = prefix,
+            "迁移记录表没有带表前缀：多应用共用一个数据库时会互相覆盖迁移版本。\
+             请在 Migrator 里覆写 migration_table_name() -> \
+             aurora::db::prefix::migration_table()"
+        );
+    }
 }

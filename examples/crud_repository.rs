@@ -11,6 +11,10 @@
 //! 数据库连接串来自 `AURORA_DATABASE__URL`（敏感项只走环境变量，见 `docs/08` §5）；
 //! 未设置时示例回退到本地 `sqlite://aurora-dev.db?mode=rwc`。
 //!
+//! 表前缀来自 `AURORA_DATABASE__TABLE_PREFIX`（默认空，即不启用）：
+//! 设成 `book` 时物理表变成 `book_users` / `book_order_items`，迁移记录表变成
+//! `book_seaql_migrations`——同一份代码换个前缀就能和别的应用共用一个数据库。
+//!
 //! ```bash
 //! curl -s -X POST -H 'Content-Type: application/json' \
 //!      -d '{"email":"a@b.com","name":"Alice"}' http://127.0.0.1:8080/users
@@ -33,13 +37,17 @@ use aurora::utils::pagination::{CursorPage, Page};
 
 /// 业务实体（由业务侧声明；框架不内置实体）。
 pub mod user {
+    use aurora::db::aurora_entity;
     use sea_orm::ActiveModelBehavior;
     use sea_orm::entity::prelude::*;
     use serde::Serialize;
 
-    /// `users` 表。
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, DeriveEntityModel)]
-    #[sea_orm(table_name = "users")]
+    /// 逻辑表 `users`：物理表名 = `{table_prefix}_users`（前缀为空时即 `users`）。
+    ///
+    /// `aurora_entity` 替代 `DeriveEntityModel` + `table_name`：表名不再固化进
+    /// 编译期，而是交给 `aurora::db::prefix` 在运行时解析。
+    #[aurora_entity(table = "users")]
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
     pub struct Model {
         #[sea_orm(primary_key)]
         pub id: i64,
@@ -56,11 +64,12 @@ pub mod user {
 
 /// 第二张表，演示迁移中的外键约束。
 pub mod order_item {
+    use aurora::db::aurora_entity;
     use sea_orm::ActiveModelBehavior;
     use sea_orm::entity::prelude::*;
 
-    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-    #[sea_orm(table_name = "order_items")]
+    #[aurora_entity(table = "order_items")]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Model {
         #[sea_orm(primary_key)]
         pub id: i64,
@@ -87,6 +96,7 @@ pub mod order_item {
 /// 项目应把每个迁移放在独立文件 `m<UTC时间戳>_<动作>_<对象>.rs` 中并 derive。
 /// 本示例为单文件，故显式实现 [`MigrationName`] 以给出互不相同的名称。
 mod migration {
+    use aurora::db::prefix;
     use sea_orm_migration::{prelude::*, schema::*};
 
     /// 汇总全部迁移（时间序）。
@@ -98,6 +108,11 @@ mod migration {
                 Box::new(M20260101000001CreateUsers),
                 Box::new(M20260101000002CreateOrderItems),
             ]
+        }
+
+        /// 迁移记录表也带前缀：多应用共用一个数据库时，各自维护自己的版本记录。
+        fn migration_table_name() -> DynIden {
+            prefix::migration_table()
         }
     }
 
@@ -114,7 +129,7 @@ mod migration {
         async fn up(&self, m: &SchemaManager) -> Result<(), DbErr> {
             m.create_table(
                 Table::create()
-                    .table("users")
+                    .table(prefix::ident("users"))
                     .col(
                         ColumnDef::new("id")
                             .big_integer()
@@ -132,8 +147,9 @@ mod migration {
 
             m.create_index(
                 Index::create()
-                    .name("uq_users_email")
-                    .table("users")
+                    // 索引名在 PostgreSQL 里是 schema 级唯一，共库时必须带前缀
+                    .name(prefix::index("uq_users_email"))
+                    .table(prefix::ident("users"))
                     .col("email")
                     .unique()
                     .to_owned(),
@@ -142,7 +158,8 @@ mod migration {
         }
 
         async fn down(&self, m: &SchemaManager) -> Result<(), DbErr> {
-            m.drop_table(Table::drop().table("users").to_owned()).await
+            m.drop_table(Table::drop().table(prefix::ident("users")).to_owned())
+                .await
         }
     }
 
@@ -159,7 +176,7 @@ mod migration {
         async fn up(&self, m: &SchemaManager) -> Result<(), DbErr> {
             m.create_table(
                 Table::create()
-                    .table("order_items")
+                    .table(prefix::ident("order_items"))
                     .col(
                         ColumnDef::new("id")
                             .big_integer()
@@ -172,9 +189,9 @@ mod migration {
                     .col(string("title"))
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk_order_items_users")
-                            .from("order_items", "user_id")
-                            .to("users", "id"),
+                            .name(prefix::index("fk_order_items_users"))
+                            .from(prefix::ident("order_items"), "user_id")
+                            .to(prefix::ident("users"), "id"),
                     )
                     .to_owned(),
             )
@@ -182,7 +199,7 @@ mod migration {
         }
 
         async fn down(&self, m: &SchemaManager) -> Result<(), DbErr> {
-            m.drop_table(Table::drop().table("order_items").to_owned())
+            m.drop_table(Table::drop().table(prefix::ident("order_items")).to_owned())
                 .await
         }
     }

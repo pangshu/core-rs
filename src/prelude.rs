@@ -14,7 +14,7 @@ pub use crate::cache::{CacheService, DistributedLock};
 pub use crate::config::ConfigWatcher;
 pub use crate::config::{AppConfig, ConfigHandle, ConfigSource, Environment, preset};
 #[cfg(feature = "db")]
-pub use crate::db::{Cursor, DbPool, Repository, transaction};
+pub use crate::db::{Cursor, DbPool, Repository, aurora_entity, prefix, transaction};
 pub use crate::errors::{AppError, AppResult, ErrorCode};
 #[cfg(feature = "geoip")]
 pub use crate::geoip::{ClientGeo, GeoInfo, GeoIp};

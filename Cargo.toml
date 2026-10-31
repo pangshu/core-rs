@@ -81,6 +81,9 @@ axum-extra = { version = "0.10", optional = true, features = ["cookie"] }
 # 数据库（驱动互斥）
 sea-orm = { version = "2", optional = true }
 sea-orm-migration = { version = "2", optional = true, default-features = false }
+# 过程宏（`proc_macro_derive` 必须独立 crate，见 src/macros.rs 顶部说明）：
+# `AuroraEntity` 把 SeaORM 的编译期表名换成运行时解析，从而支持 `[database].table_prefix`
+aurora-macros = { path = "macros", version = "0.1.0", optional = true }
 # 缓存 / 队列
 moka = { version = "0.12", optional = true, features = ["sync"] }
 # TODO(docs/04 §2.2): 文档只写 `tokio-comp`，但 `ConnectionManager`（自动重连）
@@ -189,6 +192,7 @@ revocation = ["auth", "cache"]
 db = [
     "dep:sea-orm",
     "dep:sea-orm-migration",
+    "dep:aurora-macros",
     "dep:base64",
     "dep:futures-util",
     "sea-orm/runtime-tokio-rustls",
@@ -436,3 +440,14 @@ required-features = ["resilience"]
 [[example]]
 name = "auth_session"
 required-features = ["session", "csrf"]
+
+# ---------------------------------------------------------------------------
+# Workspace（docs/03 §7 的例外）
+#
+# Rust 规定 `#[proc_macro_derive]` 必须定义在独立的 `proc-macro` crate 中，
+# 单 crate 方案无法内置派生宏。表前缀需要改写实体表名的生成代码，`macro_rules!`
+# 无法做到，故新增 `macros/` 子 crate，其余模块仍全部留在主 crate。
+# ---------------------------------------------------------------------------
+[workspace]
+members = ["macros"]
+resolver = "3"

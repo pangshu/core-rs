@@ -15,9 +15,15 @@ pub type DbPool = DatabaseConnection;
 
 /// 按配置连接数据库（启动状态机第 3 步）。
 ///
+/// 建连前先注册 `[database].table_prefix`（进程级全局状态）：所有构造路径
+/// （`AppState::build`、`TestApp`、应用自建连接）都经过这里，不存在"连上了
+/// 但表名还没定"的窗口。
+///
 /// # Errors
-/// 建连失败返回 [`StartupError::Resource`]。
+/// 表前缀非法 / 与前一次初始化冲突，或建连失败时返回 [`StartupError`]。
 pub async fn connect(cfg: &DatabaseSection) -> Result<DbPool, StartupError> {
+    crate::db::prefix::init(&cfg.table_prefix).map_err(StartupError::Config)?;
+
     let mut options = ConnectOptions::new(cfg.url.clone());
     options
         .max_connections(cfg.max_connections)
@@ -38,7 +44,7 @@ pub async fn connect(cfg: &DatabaseSection) -> Result<DbPool, StartupError> {
             ))
         })?;
 
-    tracing::info!("database connected");
+    tracing::info!(table_prefix = %cfg.table_prefix, "database connected");
     Ok(db)
 }
 

@@ -5,16 +5,23 @@
 //! 软删 / 审计。
 //!
 //! 驱动由 `db-postgres` / `db-sqlite` / `db-mysql` 三选一（互斥）。
+//!
+//! 多应用共用一个数据库时，用 `[database].table_prefix` 做表级隔离：
+//! 实体改用 [`aurora_entity`] 声明、迁移用 [`prefix::ident`] / [`prefix::index`]，
+//! 同一份代码即可落到 `book_user` / `study_user`（见 [`prefix`]）。
 
 pub mod cursor;
 mod error;
 pub mod migration;
 pub mod migrations;
 pub mod pool;
+pub mod prefix;
 pub mod repository;
 pub mod stream;
 pub mod txn;
 
+/// 表前缀感知的实体声明宏（替代 `DeriveEntityModel` + `#[sea_orm(table_name)]`）。
+pub use aurora_macros::aurora_entity;
 pub use cursor::{Cursor, paginate};
 pub use migration::{MigratorTrait, down, migrate_on_start, status, up};
 pub use pool::{DbHealth, DbPool, connect, ping};

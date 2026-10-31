@@ -13,6 +13,15 @@ use crate::config::sections::de::de_duration;
 pub struct DatabaseSection {
     /// 连接串（敏感项 🔒，只走环境变量 `AURORA_DATABASE__URL`；启用 `db` 时必填）。
     pub url: String,
+    /// 表前缀（多应用共用一个数据库时的表级隔离，默认 `""` = 不启用）。
+    ///
+    /// 配置成 `"book"` 时，逻辑表 `user` 落到物理表 `book_user`；同一份业务代码
+    /// 换个配置即落到 `study_user`。合法字符见
+    /// [`prefix::validate`](crate::db::prefix::validate)：小写字母开头，仅含小写
+    /// 字母 / 数字 / 下划线（表名会直接进 SQL，无法参数化，只能白名单）。
+    ///
+    /// 前缀是**进程级**状态且不可热更新：变更等价于数据迁移，必须重启。
+    pub table_prefix: String,
     /// 最大连接数。
     pub max_connections: u32,
     /// 最小连接数。
@@ -46,6 +55,7 @@ impl Default for DatabaseSection {
     fn default() -> Self {
         Self {
             url: String::new(),
+            table_prefix: String::new(),
             max_connections: 10,
             min_connections: 1,
             connect_timeout: Duration::from_secs(5),
@@ -75,6 +85,9 @@ impl DatabaseSection {
                  (set AURORA_DATABASE__URL)"
                 .to_string());
         }
+
+        // 表前缀会直接拼进 SQL 的表名（无法参数化绑定），必须白名单校验。
+        crate::db::prefix::validate(&self.table_prefix)?;
 
         let scheme = scheme_of(&self.url);
         if self.allow_insecure {
@@ -148,6 +161,21 @@ mod tests {
             ..DatabaseSection::default()
         };
         assert!(section.validate().is_ok());
+    }
+
+    #[test]
+    fn should_validate_table_prefix() {
+        let mut section = with_url("sqlite::memory:");
+        assert_eq!(section.table_prefix, "", "默认不启用前缀");
+        section.table_prefix = "book".to_string();
+        assert!(section.validate().is_ok());
+
+        section.table_prefix = "Book".to_string();
+        let error = section.validate().unwrap_err();
+        assert!(
+            error.contains("table_prefix"),
+            "错误信息应指出配置项，实际：{error}"
+        );
     }
 
     #[test]

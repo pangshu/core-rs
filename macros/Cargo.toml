@@ -1,0 +1,17 @@
+[package]
+name = "aurora-macros"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "aurora 过程宏：表前缀感知的实体派生"
+license = "Apache-2.0"
+# 团队内部使用，**不发布到 crates.io**（与主 crate 一致）。
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

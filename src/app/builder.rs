@@ -275,6 +275,18 @@ impl AppState {
                         } else {
                             tracing::info!(level = %new.telemetry.level, "日志级别已热更新");
                         }
+                        // 表前缀是进程级状态且决定了「访问哪张表」：改了等于换了数据集，
+                        // 热更新只能告警，不能假装生效。
+                        #[cfg(feature = "db")]
+                        if let Some(current) = crate::db::prefix::current() {
+                            if new.database.table_prefix != current {
+                                tracing::warn!(
+                                    current,
+                                    requested = %new.database.table_prefix,
+                                    "表前缀不支持热更新：进程仍使用当前值，改动需重启生效"
+                                );
+                            }
+                        }
                     },
                 );
                 match result {

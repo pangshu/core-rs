@@ -1,8 +1,11 @@
 //! 声明宏。
 //!
-//! Rust 规定 `#[proc_macro_derive]` 必须定义在独立的 `proc-macro` crate 中，
-//! 单 crate 方案下无法内置派生宏，故统一以 `macro_rules!` 实现（见
-//! `docs/03-module-design.md` §7）。
+//! Rust 规定过程宏必须定义在独立的 `proc-macro` crate 中，本 crate 内的
+//! `macro_rules!` 只能覆盖"能靠声明宏表达"的场景。
+//!
+//! 唯一的过程宏是 `aurora-macros`（子 crate，feature `db`）里的
+//! `#[aurora_entity]`：它需要改写结构体的派生列表并生成 `EntityName`，
+//! `macro_rules!` 无法表达，故按 Rust 的硬性要求独立成 crate（见 `docs/03` §7）。
 
 /// 校验当前主体是否具备对某对象执行某动作的权限。
 ///

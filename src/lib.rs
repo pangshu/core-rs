@@ -1,7 +1,8 @@
 //! aurora —— 以 Web 为主要方向的 Rust 应用基座（Application Base）。
 //!
-//! 形态为**单 crate + 能力即模块 + feature 门控**，技术栈为
-//! Axum + Tokio + Tower。
+//! 形态为**主 crate + 过程宏 crate**（`macros/`，见 [`macros`] 与 `docs/03` §7）
+//! 的模块化能力集合，技术栈为 Axum + Tokio + Tower。图省事只想依赖一个 crate
+//! 时用 `aurora` 即可——过程宏经 `aurora::db::aurora_entity` 转发。
 //!
 //! # 模块概览（M0 核心）
 //!
@@ -36,6 +37,10 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+// 过程宏 `AuroraEntity` 生成的是 `::aurora::db::...` 绝对路径：给 crate 自身起个别名，
+// 否则 crate 内部的单元测试 / 文档示例里解析不到 `::aurora`。
+extern crate self as aurora;
 
 pub mod app;
 #[cfg(feature = "auth")]
